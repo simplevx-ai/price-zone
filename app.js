@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -88,7 +88,7 @@ async function syncAlerts(silent) {
     try {
       const r = ZoneMath.analyze(await candles(w, w.tf || 'day'));
       if (r.error) continue;
-      items.push({ cat: w.cat, sym: w.sym, ex: w.ex || '', name: w.name, tf: TFS[w.tf || 'day'].label, price: r.price, zones: r.zones.map((z) => ({ low: z.low, high: z.high, score: z.score, labels: [...new Set(z.items.map((x) => x.label))] })) });
+      items.push({ cat: w.cat, sym: w.sym, ex: w.ex || '', name: w.name, tf: TFS[w.tf || 'day'].label, tfk: w.tf || 'day', price: r.price, zones: r.zones.map((z) => ({ low: z.low, high: z.high, score: z.score, labels: [...new Set(z.items.map((x) => x.label))] })) });
     } catch { /* 한 종목 실패해도 나머지는 저장 */ }
   }
   const d = await relay('saveWatch', { items });
@@ -227,7 +227,7 @@ async function viewAsset(cat, sym) {
     <div id="sum" class="card"><div class="muted">계산 중…</div></div>
     <div id="zs"></div>
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
-      <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때 6시간마다 새로 계산해 저장합니다.</div></div>
+      <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
     <div class="disc">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : ''}</div>`;
   const save = async (patch) => { const ws = await getWatch(); const i = ws.findIndex((x) => x.cat === cat && x.sym === sym); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await setWatch(ws); } };
@@ -311,6 +311,15 @@ function viewLearn() {
 }
 
 /* ───────── 설정 ───────── */
+// 스크립트의 구간 자동 재계산 상태 한 줄(설정 화면)
+function recalcLine(st) {
+  if (!st.checkedAt) return '구간 자동 재계산: 연결 확인 후 표시';
+  if ((st.version || 0) < 6) return '구간 자동 재계산: 스크립트 새 버전(v6) 배포 후 사용 가능';
+  const r = st.recalc;
+  if (!r) return '구간 자동 재계산: 매일 14시 이후 한 번 · 아직 실행 전';
+  return `구간 자동 재계산: 매일 14시 이후 한 번 · 마지막 ${new Date(r.at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${r.done}종목 성공${r.fail && r.fail.length ? ` · 실패 ${r.fail.length}(${esc(r.fail[0])})` : ''}${r.left ? ` · 남음 ${r.left}` : ''}`;
+}
+
 async function viewSettings() {
   setTitle('설정');
   const cfg = await KV.get('relay', {}), last = await KV.get('lastSync', null), st = await KV.get('relayStatus', {});
@@ -321,7 +330,8 @@ async function viewSettings() {
       <label for="r_key">앱 키 (APP_KEY)</label><input id="r_key" type="password" value="${esc(cfg.key || '')}" autocomplete="off">
       <div class="row wrap" style="margin-top:10px"><button class="btn primary" id="r_save" type="button">저장하고 연결 확인</button><button class="btn" id="r_test" type="button">테스트 알림 보내기</button><button class="btn" id="r_sync" type="button">구간 지금 저장</button></div>
       <div id="r_res" style="margin-top:8px"></div>
-      <div class="muted" style="font-size:12px">마지막 구간 저장: ${last ? new Date(last).toLocaleString('ko-KR') : '없음'}</div></div>
+      <div class="muted" style="font-size:12px">마지막 구간 저장(앱): ${last ? new Date(last).toLocaleString('ko-KR') : '없음'}</div>
+      <div class="muted" style="font-size:12px">${recalcLine(st)}</div></div>
     <div class="card"><h2>카테고리별 연결 상태</h2>
       ${stRow(true, '🪙 코인 — 업비트 공개 시세(키 없음)')}
       ${stRow(true, '⚡ 코인선물 — 바이낸스 공개 시세(키 없음)')}
@@ -344,8 +354,8 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version });
-      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 5 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null });
+      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 6 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };
