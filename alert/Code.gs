@@ -194,6 +194,19 @@ function 구간재계산지금() {
   Logger.log('재계산: ' + r.done + '개 성공 / 실패 ' + r.fail.length + (r.left ? ' / 시간 부족으로 남음 ' + r.left : '') + ' (전체 ' + r.total + ')');
   watch_().forEach((x) => Logger.log('[' + CAT_LABEL_[x.cat] + '] ' + x.name + ' ' + x.tf + (x.rcErr ? ' ❌ ' + x.rcErr : '') + '\n  전: ' + (before[x.cat + ':' + x.sym] || '-') + '\n  후: ' + (x.zones.map((z) => fmt_(z.low) + '~' + fmt_(z.high)).join(' / ') || '아래 겹치는 구간 없음')));
 }
+/** 편집기에서 실행: 알림 종목 없이도 카테고리별 샘플로 '봉 받기 → 구간 계산'이 되는지 확인(저장·알림 없음) */
+function 재계산점검() {
+  const P = PropertiesService.getScriptProperties();
+  const samples = [{ cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tfk: 'day' }, { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tfk: 'h4' }, { cat: 'cfut', sym: 'BTCUSDT', name: 'BTC 선물', tfk: 'day' }];
+  if (P.getProperty('ALPHAVANTAGE_API_KEY')) samples.push({ cat: 'us', sym: 'AAPL', name: '애플', tfk: 'day' });
+  if (P.getProperty('DATA_GO_KR_KEY') || P.getProperty('KIS_APP_KEY')) samples.push({ cat: 'kr', sym: '005930', name: '삼성전자', tfk: 'day' });
+  samples.forEach((x) => {
+    try {
+      const cs = serverCandles_(x), r = ZoneMath.analyze(cs);
+      Logger.log('✅ [' + CAT_LABEL_[x.cat] + '] ' + x.name + ' ' + TFK_[x.tfk] + ' — 봉 ' + cs.length + '개, 현재 ' + fmt_(cs[cs.length - 1].c) + (r.error ? ' / ' + r.error : ' / 구간 ' + r.zones.length + '개: ' + (r.zones.map((z) => fmt_(z.low) + '~' + fmt_(z.high)).join(' / ') || '아래 겹치는 구간 없음')));
+    } catch (e) { Logger.log('❌ [' + CAT_LABEL_[x.cat] + '] ' + x.name + ' — ' + (e && e.message || e)); }
+  });
+}
 // 종목별 봉 데이터를 스크립트가 직접 받음(앱의 sources.js fetchCandles와 같은 출처·개수)
 function serverCandles_(x) {
   const tf = TFK_[x.tfk] ? x.tfk : TFK_LABEL_[x.tf] || 'day';
