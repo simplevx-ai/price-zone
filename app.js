@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const UPBIT = 'https://api.upbit.com/v1';
 const TFS = { day: { unit: 'days', label: '일봉', name: '일' }, h4: { unit: 'minutes/240', label: '4시간봉', name: '4시간' }, h1: { unit: 'minutes/60', label: '1시간봉', name: '1시간' } };
 const DEFAULT_WATCH = [{ market: 'KRW-BTC', name: '비트코인' }, { market: 'KRW-ETH', name: '이더리움' }, { market: 'KRW-XRP', name: '리플' }];
@@ -40,11 +40,13 @@ const nowISO = () => new Date().toISOString();
 // 그래서 알림 스크립트가 연결돼 있으면 스크립트를 거쳐 받고(제한 없음), 없으면 10초 간격으로 차례로 받는다.
 const cache = new Map();
 let directQ = Promise.resolve(), lastDirect = 0;
+try { lastDirect = +localStorage.getItem('pz_lastDirect') || 0; } catch { /* 저장 안 돼도 됨 */ } // 새로고침해도 10초 간격 유지
 const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
 async function upbitDirect(path, tries = 0) {
   const wait = Math.max(0, lastDirect + 10500 - Date.now());
   if (wait) { busy(`업비트 제한 때문에 ${Math.ceil(wait / 1000)}초 기다리는 중… (설정에서 스크립트를 연결하면 빨라집니다)`); await sleep(wait); }
   lastDirect = Date.now();
+  try { localStorage.setItem('pz_lastDirect', String(lastDirect)); } catch { /* 무시 */ }
   let r;
   try { r = await fetch(UPBIT + path); } catch { throw new Error('업비트에 연결하지 못했습니다(인터넷 확인)'); }
   if (r.status === 429 && tries < 2) return upbitDirect(path, tries + 1);
@@ -60,7 +62,7 @@ async function upbit(path) {
   directQ = job.catch(() => {});
   try { return await job; } finally { busy(''); }
 }
-function busy(msg) { let b = $('#busy'); if (!b) { b = document.createElement('div'); b.id = 'busy'; b.className = 'muted'; b.style.cssText = 'position:fixed;left:0;right:0;top:calc(52px + env(safe-area-inset-top));text-align:center;font-size:12px;background:var(--bg);padding:4px;z-index:4'; document.body.appendChild(b); } b.textContent = msg; b.hidden = !msg; }
+function busy(msg) { let b = $('#busy'); if (!b) { b = document.createElement('div'); b.id = 'busy'; b.className = 'muted'; b.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));text-align:center;font-size:12px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 8px;z-index:6;box-shadow:0 2px 8px rgba(0,0,0,.15)'; document.body.appendChild(b); } b.textContent = msg; b.hidden = !msg; }
 const useRelay = async () => { const c = await KV.get('relay', {}); return !!(c.url && c.key); };
 async function markets() {
   if (cache.has('markets')) return cache.get('markets');
