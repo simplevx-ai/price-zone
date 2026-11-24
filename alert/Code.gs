@@ -14,7 +14,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 2;
+const VERSION = 3;
 const COOLDOWN_H = 6; // 같은 구간 알림은 6시간에 한 번
 
 function doPost(e) {
@@ -26,6 +26,7 @@ function doPost(e) {
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(), trigger: hasTrigger_(), watching: watch_().length });
     }
+    if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
     if (d.action === 'saveWatch') {
       const items = (d.items || []).slice(0, 30).map((x) => ({
@@ -94,6 +95,25 @@ function 알림끄기() {
 function 설정확인() {
   const P = PropertiesService.getScriptProperties();
   Logger.log('텔레그램 봇 토큰: ' + (P.getProperty('TELEGRAM_BOT_TOKEN') ? '있음' : '없음') + ' / 채팅 ID: ' + (P.getProperty('TELEGRAM_CHAT_ID') ? '있음' : '없음') + ' / 디스코드 웹훅: ' + (discordUrl_() ? '있음' : (P.getProperty('DISCORD_WEBHOOK_URL') ? '모양이 틀림' : '없음')) + ' / APP_KEY: ' + (P.getProperty('APP_KEY') ? '있음' : '없음') + ' / 자동 확인: ' + (hasTrigger_() ? '켜짐' : '꺼짐') + ' / 저장된 코인: ' + watch_().length);
+}
+
+/* 업비트 공개 시세 중계: 업비트는 브라우저 직접 요청을 10초에 1번만 허용하므로 앱 대신 받아 준다.
+   정해진 시세 주소 모양만 허용(주문·계좌 주소는 거절). 같은 주소는 30초 동안 캐시. */
+function upbitRelay_(path) {
+  const ok = /^\/candles\/(days|minutes\/240|minutes\/60)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) ||
+    /^\/ticker\?markets=KRW-[A-Z0-9]+(,KRW-[A-Z0-9]+){0,29}$/.test(path) || path === '/market/all?isDetails=false';
+  if (!ok) return { ok: false, error: '허용하지 않는 업비트 주소입니다' };
+  const cache = CacheService.getScriptCache(), ck = 'ub_' + Utilities.base64EncodeWebSafe(path).slice(0, 200);
+  const hit = cache.get(ck);
+  if (hit) return { ok: true, data: JSON.parse(hit), cached: true };
+  for (let i = 0; i < 3; i++) {
+    const r = UrlFetchApp.fetch('https://api.upbit.com/v1' + path, { muteHttpExceptions: true });
+    const c = r.getResponseCode();
+    if (c === 200) { const t = r.getContentText(); if (t.length < 95000) cache.put(ck, t, 30); return { ok: true, data: JSON.parse(t) }; }
+    if (c !== 429) return { ok: false, error: '업비트 응답 오류 ' + c };
+    Utilities.sleep(300 * (i + 1));
+  }
+  return { ok: false, error: '업비트 요청이 많아 잠시 뒤 다시 시도하세요' };
 }
 
 function watch_() { try { return (JSON.parse(PropertiesService.getScriptProperties().getProperty('WATCH') || '{}').items) || []; } catch (e) { return []; } }

@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const UPBIT = 'https://api.upbit.com/v1';
 const TFS = { day: { unit: 'days', label: '일봉', name: '일' }, h4: { unit: 'minutes/240', label: '4시간봉', name: '4시간' }, h1: { unit: 'minutes/60', label: '1시간봉', name: '1시간' } };
 const DEFAULT_WATCH = [{ market: 'KRW-BTC', name: '비트코인' }, { market: 'KRW-ETH', name: '이더리움' }, { market: 'KRW-XRP', name: '리플' }];
@@ -36,22 +36,45 @@ function setTitle(t, back) { $('#title').textContent = t; $('#backBtn').hidden =
 const nowISO = () => new Date().toISOString();
 
 /* ───────── 업비트 공개 시세 ───────── */
+// 업비트는 브라우저에서 직접 보낸 요청(Origin 헤더 있음)을 10초에 1번만 허용한다.
+// 그래서 알림 스크립트가 연결돼 있으면 스크립트를 거쳐 받고(제한 없음), 없으면 10초 간격으로 차례로 받는다.
 const cache = new Map();
-async function upbit(path) {
+let directQ = Promise.resolve(), lastDirect = 0;
+const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
+async function upbitDirect(path, tries = 0) {
+  const wait = Math.max(0, lastDirect + 10500 - Date.now());
+  if (wait) { busy(`업비트 제한 때문에 ${Math.ceil(wait / 1000)}초 기다리는 중… (설정에서 스크립트를 연결하면 빨라집니다)`); await sleep(wait); }
+  lastDirect = Date.now();
   let r;
   try { r = await fetch(UPBIT + path); } catch { throw new Error('업비트에 연결하지 못했습니다(인터넷 확인)'); }
-  if (r.status === 429) { await new Promise((s) => setTimeout(s, 600)); return upbit(path); }
+  if (r.status === 429 && tries < 2) return upbitDirect(path, tries + 1);
   if (!r.ok) throw new Error('업비트 응답 오류 ' + r.status);
   return r.json();
 }
+async function upbit(path) {
+  const cfg = await KV.get('relay', {});
+  if (cfg.url && cfg.key) {
+    try { const d = await relay('upbit', { path }); return d.data; } catch (e) { if (/denied|APP_KEY/.test(e.message)) throw e; /* 스크립트가 옛 버전·오류면 직접 받기로 */ }
+  }
+  const job = directQ.then(() => upbitDirect(path));
+  directQ = job.catch(() => {});
+  try { return await job; } finally { busy(''); }
+}
+function busy(msg) { let b = $('#busy'); if (!b) { b = document.createElement('div'); b.id = 'busy'; b.className = 'muted'; b.style.cssText = 'position:fixed;left:0;right:0;top:calc(52px + env(safe-area-inset-top));text-align:center;font-size:12px;background:var(--bg);padding:4px;z-index:4'; document.body.appendChild(b); } b.textContent = msg; b.hidden = !msg; }
+const useRelay = async () => { const c = await KV.get('relay', {}); return !!(c.url && c.key); };
 async function markets() {
   if (cache.has('markets')) return cache.get('markets');
+  const saved = await KV.get('markets', null);
+  if (saved && Date.now() - saved.at < 86400e3) { cache.set('markets', saved.data); return saved.data; }
   const all = (await upbit('/market/all?isDetails=false')).filter((m) => m.market.startsWith('KRW-'));
-  cache.set('markets', all); return all;
+  cache.set('markets', all); KV.set('markets', { at: Date.now(), data: all }).catch(() => {}); return all;
 }
-async function candles(market, tf, total = 400) {
-  const key = `c:${market}:${tf}`, hit = cache.get(key);
-  if (hit && Date.now() - hit.at < 60000) return hit.data;
+// 캔들: 스크립트 연결 시 400개, 직접 받을 땐 200개(요청 1번). 폰에 저장해 두고 봉 단위별로 일정 시간 다시 씀
+const FRESH = { day: 30 * 60e3, h4: 10 * 60e3, h1: 5 * 60e3 };
+async function candles(market, tf, total) {
+  const key = `c:${market}:${tf}`, hit = cache.get(key) || (await KV.get(key, null));
+  if (hit && Date.now() - hit.at < FRESH[tf]) { cache.set(key, hit); return hit.data; }
+  if (total == null) total = (await useRelay()) ? 400 : 200;
   let out = [], to = '';
   while (out.length < total) {
     const r = await upbit(`/candles/${TFS[tf].unit}?market=${market}&count=200${to ? '&to=' + encodeURIComponent(to) : ''}`);
@@ -62,6 +85,7 @@ async function candles(market, tf, total = 400) {
   }
   const data = out.reverse().map((k) => ({ t: k.timestamp, d: k.candle_date_time_kst, o: k.opening_price, h: k.high_price, l: k.low_price, c: k.trade_price, v: k.candle_acc_trade_volume }));
   cache.set(key, { at: Date.now(), data });
+  KV.set(key, { at: Date.now(), data }).catch(() => {});
   return data;
 }
 const tickers = (ms) => upbit('/ticker?markets=' + ms.join(','));
