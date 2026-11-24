@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -75,7 +75,8 @@ async function needMsg(cat) {
   if (!n) return '';
   if (!(await relayOn())) return `설정에서 스크립트를 연결하고 ${NEED_LABEL[n]}를 넣어야 볼 수 있습니다`;
   const st = await KV.get('relayStatus', {});
-  if (st.checkedAt && st[n] === false) return `스크립트 속성에 ${NEED_LABEL[n]}가 아직 없습니다`;
+  const has = n.split('|').some((k) => st[k]);
+  if (st.checkedAt && !has) return `스크립트 속성에 ${NEED_LABEL[n]}가 아직 없습니다`;
   return '';
 }
 
@@ -173,7 +174,8 @@ async function viewAdd() {
   const draw = async () => {
     const c = CATS[cat];
     const nm = await needMsg(cat);
-    const manual = cat === 'kr' || cat === 'ffut';
+    const remote = cat === 'us' || cat === 'kr'; // 입력해야 찾는(스크립트 경유) 카테고리
+    const manual = cat === 'ffut' || (cat === 'kr' && (nm || (await krSource()) === 'kis'));
     view().innerHTML = `${catChips(cat, false)}
       ${nm ? `<div class="card warnlist" style="margin-top:0">🔑 ${esc(nm)}. 종목은 미리 추가해 둘 수 있습니다. <a href="#/settings">설정 ›</a></div>` : ''}
       <div class="card">${manual ? `
@@ -181,8 +183,8 @@ async function viewAdd() {
         ${cat === 'ffut' ? '<label for="m_ex">거래소</label><input id="m_ex" placeholder="CME" autocomplete="off">' : ''}
         <label for="m_name">이름</label><input id="m_name" placeholder="${cat === 'kr' ? '삼성전자' : '나스닥100 12월물'}">
         <button class="btn primary block" id="m_add" type="button" style="margin-top:10px">추가</button>
-        <div class="muted" style="font-size:12px;margin-top:6px">${cat === 'kr' ? '한국투자증권 API에는 이름 검색이 없어 코드를 직접 넣습니다.' : '해외선물은 월물마다 코드가 바뀝니다(예: 나스닥100 2025년 12월물 = NQZ25). 만기가 지나면 다음 월물로 다시 추가하세요.'}</div>`
-      : `<input id="q" placeholder="${esc(c.hint || '이름이나 기호')}" autocomplete="off"><div class="pick" id="pk"><div class="muted" style="padding:10px">${cat === 'us' ? '티커나 회사 이름을 입력하세요' : '불러오는 중…'}</div></div>`}</div>`;
+        <div class="muted" style="font-size:12px;margin-top:6px">${cat === 'kr' ? (nm ? '스크립트 연결 전이라 코드를 직접 넣습니다. 공공데이터 서비스키를 넣으면 이름으로 찾을 수 있습니다.' : '한국투자증권 API에는 이름 검색이 없어 코드를 직접 넣습니다.') : '해외선물은 월물마다 코드가 바뀝니다(예: 나스닥100 2025년 12월물 = NQZ25). 만기가 지나면 다음 월물로 다시 추가하세요.'}</div>`
+      : `<input id="q" placeholder="${esc(c.hint || '이름이나 기호')}" autocomplete="off"><div class="pick" id="pk"><div class="muted" style="padding:10px">${remote ? '이름이나 코드를 입력하세요' : '불러오는 중…'}</div></div>`}</div>`;
     view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { cat = b.dataset.cat; sessionStorage.setItem('pzAddCat', cat); draw(); }; });
     if (manual) {
       $('#m_add').onclick = () => {
@@ -196,7 +198,7 @@ async function viewAdd() {
     let tmr;
     const run = async () => {
       const q = $('#q').value;
-      if (cat === 'us' && !q.trim()) return;
+      if (remote && !q.trim()) return;
       $('#pk').innerHTML = '<div class="muted" style="padding:10px">찾는 중…</div>';
       try {
         const L = await searchAssets(cat, q);
@@ -204,8 +206,8 @@ async function viewAdd() {
         $('#pk').querySelectorAll('[data-i]').forEach((b) => { b.onclick = () => add(L[+b.dataset.i]); });
       } catch (e) { $('#pk').innerHTML = `<div class="errbox" style="margin:8px">${esc(e.message)}</div>`; }
     };
-    $('#q').oninput = () => { clearTimeout(tmr); tmr = setTimeout(run, cat === 'us' ? 700 : 150); };
-    if (cat !== 'us') run();
+    $('#q').oninput = () => { clearTimeout(tmr); tmr = setTimeout(run, remote ? 700 : 150); };
+    if (!remote) run();
     $('#q').focus();
   };
   draw();
@@ -227,7 +229,7 @@ async function viewAsset(cat, sym) {
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때 6시간마다 새로 계산해 저장합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
-    <div class="disc">공부용 · 매수 추천 아님 · ${CATS[cat].label}</div>`;
+    <div class="disc">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : ''}</div>`;
   const save = async (patch) => { const ws = await getWatch(); const i = ws.findIndex((x) => x.cat === cat && x.sym === sym); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await setWatch(ws); } };
   view().querySelectorAll('[name=tf]').forEach((el) => { el.onchange = async () => { await save({ tf: el.value }); render(); }; });
   if ($('#del')) $('#del').onclick = async () => { if (!confirm(`${w.name}을(를) 관심 종목에서 뺄까요?`)) return; await setWatch((await getWatch()).filter((x) => !(x.cat === cat && x.sym === sym))); location.hash = '#/'; };
@@ -324,7 +326,8 @@ async function viewSettings() {
       ${stRow(true, '🪙 코인 — 업비트 공개 시세(키 없음)')}
       ${stRow(true, '⚡ 코인선물 — 바이낸스 공개 시세(키 없음)')}
       ${stRow(st.checkedAt ? !!st.av : null, '🇺🇸 해외주식 — Alpha Vantage (속성 ALPHAVANTAGE_API_KEY)')}
-      ${stRow(st.checkedAt ? !!st.kis : null, '🇰🇷 국내주식·🌐 해외선물 — 한국투자증권 (속성 KIS_APP_KEY·KIS_APP_SECRET)')}
+      ${stRow(st.checkedAt ? !!(st.krx || st.kis) : null, '🇰🇷 국내주식 — 공공데이터포털 (속성 DATA_GO_KR_KEY, 하루 1번 갱신) 또는 한국투자증권')}
+      ${stRow(st.checkedAt ? !!st.kis : null, '🌐 해외선물 — 한국투자증권 (속성 KIS_APP_KEY·KIS_APP_SECRET)')}
       <div class="muted" style="font-size:12px;margin-top:6px">❔는 아직 연결 확인 전입니다. 키는 Apps Script → 프로젝트 설정 → 스크립트 속성에 직접 넣으세요.</div></div>
     <div class="card"><h2>알아 두기</h2><ul class="steps">
       <li>이 앱은 <b>시세 조회</b>만 합니다. 주문·계좌 기능은 없습니다.</li>
@@ -341,8 +344,8 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, telegram: !!d.telegram, discord: !!d.discord, version: d.version });
-      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 4 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version });
+      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 5 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };

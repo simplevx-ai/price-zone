@@ -49,6 +49,7 @@
         <tr><td>TELEGRAM_CHAT_ID</td><td>알림 받을 채팅 ID(숫자)</td></tr>
         <tr><td>DISCORD_WEBHOOK_URL</td><td>디스코드 웹훅 주소</td></tr>
         <tr><td>ALPHAVANTAGE_API_KEY</td><td>Alpha Vantage 키 — 🇺🇸 해외주식을 볼 때</td></tr>
+        <tr><td>DATA_GO_KR_KEY</td><td>공공데이터포털 서비스키 — 🇰🇷 국내주식(한투 없이, 하루 1번 갱신)</td></tr>
         <tr><td>KIS_APP_KEY</td><td>한국투자증권 앱키 — 🇰🇷 국내주식·🌐 해외선물을 볼 때</td></tr>
         <tr><td>KIS_APP_SECRET</td><td>한국투자증권 앱시크릿</td></tr>
         <tr><td>KIS_ENV</td><td>real(실전, 비워 두면 이것) 또는 demo(모의투자 키일 때)</td></tr>
@@ -60,6 +61,14 @@
         <li>편집기 위 함수 목록에서 <b>알림켜기</b> 선택 → ▶ 실행 → 권한 허용. (10분마다 가격확인이 돕니다)</li>
         <li><b>설정확인</b>을 실행해 쓰는 곳이 ‘있음’, 자동 확인이 ‘켜짐’으로 나오는지 봅니다.</li>
         <li><b>배포 → 새 배포 → 웹 앱</b>, 실행: 나, 액세스: 모든 사용자 → 배포 → 웹 앱 URL(…/exec) 복사. APP_KEY가 맞아야만 동작합니다.</li>
+      </ol></div>
+
+    <div class="card"><h2>공공데이터 서비스키 받기 (국내주식, 계좌 없이)</h2>
+      <ol class="big">
+        <li><a href="https://www.data.go.kr/data/15094808/openapi.do" target="_blank" rel="noopener">금융위원회_주식시세정보</a> 페이지에서 로그인(회원가입) → <b>활용신청</b> → 목적 적고 신청(보통 바로 승인).</li>
+        <li>마이페이지 → 데이터활용 → Open API → 활용신청 현황 → 이 API → <b>일반 인증키</b>를 복사(인코딩·디코딩 아무거나).</li>
+        <li>스크립트 속성 <span class="k">DATA_GO_KR_KEY</span>에 붙여 넣고 저장 → 편집기에서 <b>국내주식연결확인</b> 실행. 승인 직후엔 1~2시간 뒤에 동작하기도 합니다.</li>
+        <li>시세는 하루 1번(다음 영업일 오후 1시 이후) 갱신됩니다. 출처: 금융위원회. 개인 공부용으로만 쓰세요(공공누리 4유형: 상업적 이용·재배포 금지).</li>
       </ol></div>
 
     <div class="card"><h2>한국투자증권 키 받기 (국내주식·해외선물)</h2>

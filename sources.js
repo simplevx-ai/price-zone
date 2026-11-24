@@ -10,7 +10,7 @@
 'use strict';
 
 const CATS = {
-  kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'kis', hint: '종목코드 6자리(예: 005930)' },
+  kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'krx|kis', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
   us: { label: '해외주식', icon: '🇺🇸', tfs: ['day', 'week'], unit: '$', needs: 'av', hint: '티커(예: AAPL, NVDA)' },
   coin: { label: '코인', icon: '🪙', tfs: ['day', 'h4', 'h1'], unit: '원' },
   cfut: { label: '코인선물', icon: '⚡', tfs: ['day', 'h4', 'h1'], unit: 'USDT' },
@@ -21,7 +21,20 @@ const TFS = {
   h4: { label: '4시간봉', name: '4시간' }, h1: { label: '1시간봉', name: '1시간' },
 };
 const FRESH = { day: 30 * 60e3, week: 6 * 3600e3, h4: 10 * 60e3, h1: 5 * 60e3 };
-const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키' };
+const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', 'krx|kis': '공공데이터 서비스키(또는 한국투자증권 키)' };
+// 국내주식 출처: 한투 키가 있으면 한투(장중 시세), 없으면 공공데이터(전 영업일까지)
+async function krSource() { const st = await KV.get('relayStatus', {}); return st.kis ? 'kis' : 'krx'; }
+// 일봉 → 주봉(월요일 시작 주로 묶기)
+function toWeekly(cs) {
+  const out = [];
+  for (const k of cs) {
+    const d = new Date(k.t + 9 * 3600e3), wk = Math.floor((d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400e3) / (7 * 86400e3));
+    const last = out[out.length - 1];
+    if (last && last.wk === wk) { last.h = Math.max(last.h, k.h); last.l = Math.min(last.l, k.l); last.c = k.c; last.v += k.v; }
+    else out.push({ wk, t: k.t, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v });
+  }
+  return out.map(({ wk, ...k }) => k);
+}
 
 const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
 const num = (x) => (x == null || x === '' ? NaN : Number(String(x).replace(/,/g, '')));
@@ -87,6 +100,11 @@ async function fetchCandles(a, tf) {
     if (!key) throw new Error(j.Note || j.Information || j['Error Message'] || 'Alpha Vantage 응답에 시세가 없습니다');
     return Object.entries(j[key]).map(([day, v]) => ({ t: Date.parse(day + 'T00:00:00Z'), o: num(v['1. open']), h: num(v['2. high']), l: num(v['3. low']), c: num(v['4. close']), v: num(v['5. volume']) })).sort((x, y) => x.t - y.t);
   }
+  if (a.cat === 'kr' && (await krSource()) === 'krx') {
+    const d = await relay('krx', { kind: 'candles', code: a.sym });
+    const cs = d.candles || [];
+    return tf === 'week' ? toWeekly(cs) : cs;
+  }
   if (a.cat === 'kr' || a.cat === 'ffut') {
     const d = await relay('kis', a.cat === 'kr' ? { kind: 'krCandles', code: a.sym, period: tf === 'week' ? 'W' : 'D' } : { kind: 'ffCandles', code: a.sym, exch: a.ex || '' });
     return d.candles || [];
@@ -116,6 +134,10 @@ async function searchAssets(cat, q) {
     const m = (d.data && d.data.bestMatches) || [];
     if (!m.length && d.data && (d.data.Note || d.data.Information)) throw new Error(d.data.Note || d.data.Information);
     return m.slice(0, 15).map((x) => ({ sym: x['1. symbol'], name: x['2. name'], sub: `${x['1. symbol']} · ${x['4. region']} · ${x['8. currency']}` }));
+  }
+  if (cat === 'kr') {
+    if (!q) return [];
+    return (await relay('krx', { kind: 'search', q })).items || [];
   }
   return [];
 }

@@ -15,11 +15,12 @@
  *   KIS_APP_KEY          한국투자증권 앱키          ┐ 국내주식·해외선물을 볼 때
  *   KIS_APP_SECRET       한국투자증권 앱시크릿      ┘
  *   KIS_ENV              real(실전, 기본) 또는 demo(모의투자)
+ *   DATA_GO_KR_KEY       공공데이터포털 '금융위원회_주식시세정보' 서비스키 — 국내주식(한투 없이, 하루 1번 갱신)
  *
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 4;
+const VERSION = 5;
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
 const US_CHECK_H = 3;       // 해외주식은 Alpha Vantage 무료 한도 때문에 3시간마다 확인
 const CATS_ = ['kr', 'us', 'coin', 'cfut', 'ffut'];
@@ -33,11 +34,12 @@ function doPost(e) {
     if (!appKey || d.key !== appKey) return json_({ ok: false, error: 'denied' });
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
-        av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), trigger: hasTrigger_(), watching: watch_().length });
+        av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length });
     }
     if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'av') return json_(avRelay_(d));
     if (d.action === 'kis') return json_(kisRelay_(d));
+    if (d.action === 'krx') return json_(krxRelay_(d));
     if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
     if (d.action === 'saveWatch') {
       const items = (d.items || []).slice(0, 40).map((x) => ({
@@ -79,6 +81,10 @@ function 가격확인() {
       try { const q = avFetch_({ function: 'GLOBAL_QUOTE', symbol: x.sym }, 0); const p = Number(q && q['Global Quote'] && q['Global Quote']['05. price']); if (p) price['us:' + x.sym] = p; } catch (e) { /* 다음에 */ }
     });
     P.setProperty('LAST_US', String(now));
+  }
+  // 국내주식: 공공데이터(전 영업일 종가, 한투 키가 없을 때)
+  if (P.getProperty('DATA_GO_KR_KEY') && !(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'))) {
+    items.filter((x) => x.cat === 'kr').forEach((x) => { try { const cs = krxCandlesCached_(x.sym); if (cs.length) price['kr:' + x.sym] = cs[cs.length - 1].c; } catch (e) { /* 다음에 */ } });
   }
   // 국내주식·해외선물: 한국투자증권
   if (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')) {
@@ -239,6 +245,70 @@ function kisRelay_(d) {
   return { ok: false, error: '알 수 없는 요청' };
 }
 
+/* ───────── 공공데이터포털 '금융위원회_주식시세정보'(국내주식): 계좌 없이, 하루 1번(다음 영업일 13시 이후) 갱신 ─────────
+   출처: 금융위원회(공공데이터포털, 공공누리 4유형 — 출처표시·상업적 이용 금지·변경 금지). 개인 공부용으로만. */
+const KRX_URL_ = 'https://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo';
+function krxKey_() {
+  const k = String(PropertiesService.getScriptProperties().getProperty('DATA_GO_KR_KEY') || '').trim();
+  return /%[0-9A-Fa-f]{2}/.test(k) ? k : encodeURIComponent(k); // '인코딩' 키를 넣어도, '디코딩' 키를 넣어도 됨
+}
+function krxGet_(params) {
+  const url = KRX_URL_ + '?serviceKey=' + krxKey_() + '&resultType=json&' + Object.keys(params).map((k) => k + '=' + encodeURIComponent(params[k])).join('&');
+  const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const t = r.getContentText();
+  let j; try { j = JSON.parse(t); } catch (e) { throw new Error('공공데이터 응답을 읽지 못함(' + r.getResponseCode() + '): ' + t.slice(0, 120)); }
+  const err = j.OpenAPI_ServiceResponse && j.OpenAPI_ServiceResponse.cmmMsgHeader;
+  if (err) throw new Error('공공데이터: ' + (err.returnAuthMsg || err.errMsg) + ' (서비스키·활용신청 승인 확인)');
+  const h = j.response && j.response.header;
+  if (h && h.resultCode !== '00') throw new Error('공공데이터: ' + h.resultMsg);
+  const it = j.response && j.response.body && j.response.body.items && j.response.body.items.item;
+  return Array.isArray(it) ? it : it ? [it] : [];
+}
+function krxCandles_(code) {
+  const begin = Utilities.formatDate(new Date(Date.now() - 800 * 86400e3), 'Asia/Seoul', 'yyyyMMdd');
+  const rows = krxGet_({ likeSrtnCd: code, beginBasDt: begin, numOfRows: 700, pageNo: 1 }).filter((x) => String(x.srtnCd) === code);
+  const out = {};
+  rows.forEach((x) => { const c = Number(x.clpr); if (!/^\d{8}$/.test(String(x.basDt)) || !c) return; out[x.basDt] = { t: Date.parse(String(x.basDt).replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') + 'T00:00:00+09:00'), o: Number(x.mkp) || c, h: Number(x.hipr) || c, l: Number(x.lopr) || c, c: c, v: Number(x.trqu) || 0 }; });
+  return Object.keys(out).sort().map((k) => out[k]);
+}
+function krxCandlesCached_(code) {
+  const cache = CacheService.getScriptCache(), ck = 'krx_' + code, hit = cache.get(ck);
+  if (hit) return JSON.parse(hit);
+  const cs = krxCandles_(code);
+  const t = JSON.stringify(cs); if (t.length < 95000) cache.put(ck, t, 3 * 3600);
+  return cs;
+}
+function krxRelay_(d) {
+  if (!PropertiesService.getScriptProperties().getProperty('DATA_GO_KR_KEY')) return { ok: false, error: '스크립트 속성에 DATA_GO_KR_KEY가 없습니다' };
+  if (d.kind === 'candles') {
+    const code = String(d.code || '').replace(/\D/g, '');
+    if (!/^\d{6}$/.test(code)) return { ok: false, error: '종목코드는 숫자 6자리입니다' };
+    return { ok: true, candles: krxCandlesCached_(code) };
+  }
+  if (d.kind === 'search') {
+    const q = String(d.q || '').trim().slice(0, 20);
+    if (!q) return { ok: true, items: [] };
+    const cache = CacheService.getScriptCache(), ck = 'krxs_' + Utilities.base64EncodeWebSafe(q).slice(0, 100), hit = cache.get(ck);
+    if (hit) return { ok: true, items: JSON.parse(hit) };
+    const begin = Utilities.formatDate(new Date(Date.now() - 10 * 86400e3), 'Asia/Seoul', 'yyyyMMdd');
+    const rows = krxGet_(/^\d{1,6}$/.test(q) ? { likeSrtnCd: q, beginBasDt: begin, numOfRows: 200, pageNo: 1 } : { likeItmsNm: q, beginBasDt: begin, numOfRows: 200, pageNo: 1 });
+    const seen = {}, items = [];
+    rows.forEach((x) => { if (!seen[x.srtnCd]) { seen[x.srtnCd] = 1; items.push({ sym: String(x.srtnCd), name: String(x.itmsNm), sub: x.srtnCd + ' · ' + (x.mrktCtg || '') }); } });
+    const out = items.slice(0, 30);
+    cache.put(ck, JSON.stringify(out), 6 * 3600);
+    return { ok: true, items: out };
+  }
+  return { ok: false, error: '알 수 없는 요청' };
+}
+
+/** DATA_GO_KR_KEY를 넣은 뒤 실행: 삼성전자 일봉을 받아 봄(키 값은 찍지 않음) */
+function 국내주식연결확인() {
+  const cs = krxCandles_('005930');
+  Logger.log('삼성전자 일봉 ' + cs.length + '개 받음. 마지막: ' + (cs.length ? new Date(cs[cs.length - 1].t + 9 * 3600e3).toISOString().slice(0, 10) + ' 종가 ' + cs[cs.length - 1].c : '없음'));
+  const s = krxRelay_({ kind: 'search', q: '삼성' });
+  Logger.log('이름 검색 "삼성": ' + (s.items || []).slice(0, 5).map((x) => x.name + '(' + x.sym + ')').join(', '));
+}
+
 /** 처음 한 번 실행: 10분마다 가격확인 트리거 만들기 */
 function 알림켜기() {
   ScriptApp.getProjectTriggers().forEach((t) => { if (t.getHandlerFunction() === '가격확인') ScriptApp.deleteTrigger(t); });
@@ -254,7 +324,7 @@ function 알림끄기() {
 function 설정확인() {
   const P = PropertiesService.getScriptProperties();
   Logger.log('텔레그램 봇 토큰: ' + (P.getProperty('TELEGRAM_BOT_TOKEN') ? '있음' : '없음') + ' / 채팅 ID: ' + (P.getProperty('TELEGRAM_CHAT_ID') ? '있음' : '없음') + ' / 디스코드 웹훅: ' + (discordUrl_() ? '있음' : (P.getProperty('DISCORD_WEBHOOK_URL') ? '모양이 틀림' : '없음')) + ' / APP_KEY: ' + (P.getProperty('APP_KEY') ? '있음' : '없음') + ' / 자동 확인: ' + (hasTrigger_() ? '켜짐' : '꺼짐') + ' / 알림 종목: ' + watch_().length);
-  Logger.log('Alpha Vantage 키: ' + (P.getProperty('ALPHAVANTAGE_API_KEY') ? '있음' : '없음') + ' / 한국투자증권 키: ' + (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET') ? '있음' : '없음') + ' (' + (P.getProperty('KIS_ENV') || 'real') + ')');
+  Logger.log('Alpha Vantage 키: ' + (P.getProperty('ALPHAVANTAGE_API_KEY') ? '있음' : '없음') + ' / 공공데이터 키: ' + (P.getProperty('DATA_GO_KR_KEY') ? '있음' : '없음') + ' / 한국투자증권 키: ' + (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET') ? '있음' : '없음') + ' (' + (P.getProperty('KIS_ENV') || 'real') + ')');
 }
 /** 한국투자증권 키를 넣은 뒤 한 번 실행: 토큰 발급·삼성전자 일봉 받기가 되는지 확인(값은 찍지 않음) */
 function 한투연결확인() {
@@ -270,6 +340,7 @@ function 연결점검() {
   line('OKX 선물(코인선물 예비)', () => { const r = UrlFetchApp.fetch('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP', { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) throw new Error('응답 ' + r.getResponseCode()); return 'BTC-USDT-SWAP ' + JSON.parse(r.getContentText()).data[0].last; });
   line('코인선물 알림용 가격(바이낸스→OKX)', () => { const p = cfutPrice_('BTCUSDT'); if (!p) throw new Error('둘 다 실패'); return String(p); });
   line('Alpha Vantage(해외주식, 공개 demo 키로 IBM)', () => { const r = UrlFetchApp.fetch('https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey=demo', { muteHttpExceptions: true }); const j = JSON.parse(r.getContentText()); if (!j['Global Quote']) throw new Error(j.Note || j.Information || '응답 이상'); return 'IBM $' + j['Global Quote']['05. price']; });
+  line('공공데이터포털 주식시세(국내주식, 키 없이)', () => { const r = UrlFetchApp.fetch(KRX_URL_ + '?serviceKey=TEST&resultType=json&numOfRows=1', { muteHttpExceptions: true }); const t = r.getContentText(); if (!/SERVICE_KEY|등록되지/.test(t)) throw new Error('응답 ' + r.getResponseCode() + ': ' + t.slice(0, 80)); return '서버에 닿음(서비스키를 넣으면 시세 받기 가능)'; });
   line('한국투자증권 서버 접속(포트 9443, 키 없이)', () => { const r = UrlFetchApp.fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', { method: 'post', contentType: 'application/json', payload: '{}', muteHttpExceptions: true }); return '응답 ' + r.getResponseCode() + ' — 서버에 닿음(키를 넣으면 토큰 발급 가능)'; });
 }
 /** 텔레그램·디스코드 값을 넣은 뒤 실행: 테스트 알림 한 통 보내기 */
