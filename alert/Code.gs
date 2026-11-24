@@ -2,17 +2,19 @@
  * 가격 위치 앱 — 텔레그램 알림 스크립트 (Google Apps Script 웹 앱 + 10분 자동 확인)
  *
  * 앱이 계산한 '검토 구간'을 저장해 두고, 10분마다 업비트 공개 시세(키 없음)로 현재가를 확인해
- * 가격이 구간에 '들어올 때' 텔레그램으로 알린다. 주문 기능은 없다.
+ * 가격이 구간에 '들어올 때' 텔레그램·디스코드로 알린다(설정한 곳 모두). 주문 기능은 없다.
  *
  * ── 스크립트 속성(프로젝트 설정 → 스크립트 속성)에 직접 넣을 값 ──
- *   TELEGRAM_BOT_TOKEN  텔레그램 봇 토큰(@BotFather에서 받은 값)
- *   TELEGRAM_CHAT_ID    알림 받을 채팅 ID(숫자)
+ *   TELEGRAM_BOT_TOKEN  텔레그램 봇 토큰(@BotFather에서 받은 값)   ┐ 텔레그램을 쓸 때
+ *   TELEGRAM_CHAT_ID    알림 받을 채팅 ID(숫자)                      ┘
+ *   DISCORD_WEBHOOK_URL 디스코드 채널 웹훅 주소(https://discord.com/api/webhooks/…) — 디스코드를 쓸 때
+ *   (텔레그램·디스코드 중 하나 이상)
  *   APP_KEY             앱과 이 스크립트만 아는 암호(아무 긴 문자열). 앱 설정에도 같은 값
  *
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 1;
+const VERSION = 2;
 const COOLDOWN_H = 6; // 같은 구간 알림은 6시간에 한 번
 
 function doPost(e) {
@@ -22,9 +24,9 @@ function doPost(e) {
     const appKey = (P.getProperty('APP_KEY') || '').trim();
     if (!appKey || d.key !== appKey) return json_({ ok: false, error: 'denied' });
     if (d.action === 'ping') {
-      return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), trigger: hasTrigger_(), watching: watch_().length });
+      return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(), trigger: hasTrigger_(), watching: watch_().length });
     }
-    if (d.action === 'test') { send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true }); }
+    if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
     if (d.action === 'saveWatch') {
       const items = (d.items || []).slice(0, 30).map((x) => ({
         market: String(x.market || '').replace(/[^A-Z0-9-]/g, '').slice(0, 20), name: String(x.name || '').slice(0, 40), tf: String(x.tf || '').slice(0, 10),
@@ -91,17 +93,34 @@ function 알림끄기() {
 /** 편집기에서 실행해 설정 확인(토큰 값은 찍지 않음) */
 function 설정확인() {
   const P = PropertiesService.getScriptProperties();
-  Logger.log('봇 토큰: ' + (P.getProperty('TELEGRAM_BOT_TOKEN') ? '있음' : '없음') + ' / 채팅 ID: ' + (P.getProperty('TELEGRAM_CHAT_ID') ? '있음' : '없음') + ' / APP_KEY: ' + (P.getProperty('APP_KEY') ? '있음' : '없음') + ' / 자동 확인: ' + (hasTrigger_() ? '켜짐' : '꺼짐') + ' / 저장된 코인: ' + watch_().length);
+  Logger.log('텔레그램 봇 토큰: ' + (P.getProperty('TELEGRAM_BOT_TOKEN') ? '있음' : '없음') + ' / 채팅 ID: ' + (P.getProperty('TELEGRAM_CHAT_ID') ? '있음' : '없음') + ' / 디스코드 웹훅: ' + (discordUrl_() ? '있음' : (P.getProperty('DISCORD_WEBHOOK_URL') ? '모양이 틀림' : '없음')) + ' / APP_KEY: ' + (P.getProperty('APP_KEY') ? '있음' : '없음') + ' / 자동 확인: ' + (hasTrigger_() ? '켜짐' : '꺼짐') + ' / 저장된 코인: ' + watch_().length);
 }
 
 function watch_() { try { return (JSON.parse(PropertiesService.getScriptProperties().getProperty('WATCH') || '{}').items) || []; } catch (e) { return []; } }
 function hasTrigger_() { return ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === '가격확인'); }
+// 설정된 곳(텔레그램·디스코드) 모두에 보낸다. 한 곳이라도 성공하면 통과, 모두 실패하면 오류
 function send_(text) {
   const P = PropertiesService.getScriptProperties();
   const token = (P.getProperty('TELEGRAM_BOT_TOKEN') || '').trim(), chat = (P.getProperty('TELEGRAM_CHAT_ID') || '').trim();
-  if (!token || !chat) throw new Error('스크립트 속성에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID가 없습니다');
-  const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/sendMessage', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ chat_id: chat, text: text, disable_web_page_preview: true }), muteHttpExceptions: true });
-  if (r.getResponseCode() !== 200) throw new Error('텔레그램 전송 실패(' + r.getResponseCode() + ')');
+  const hook = discordUrl_();
+  if (!(token && chat) && !hook) throw new Error('스크립트 속성에 텔레그램(TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID) 또는 디스코드(DISCORD_WEBHOOK_URL)가 없습니다');
+  const done = [], fail = [];
+  if (token && chat) {
+    const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/sendMessage', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ chat_id: chat, text: text, disable_web_page_preview: true }), muteHttpExceptions: true });
+    (r.getResponseCode() === 200 ? done : fail).push('텔레그램' + (r.getResponseCode() === 200 ? '' : '(' + r.getResponseCode() + ')'));
+  }
+  if (hook) {
+    const r = UrlFetchApp.fetch(hook, { method: 'post', contentType: 'application/json', payload: JSON.stringify({ username: '가격 위치', content: text.slice(0, 1990), allowed_mentions: { parse: [] } }), muteHttpExceptions: true });
+    const c = r.getResponseCode();
+    (c === 200 || c === 204 ? done : fail).push('디스코드' + (c === 200 || c === 204 ? '' : '(' + c + ')'));
+  }
+  if (!done.length) throw new Error('알림 전송 실패: ' + fail.join(', '));
+  return { done: done, fail: fail };
+}
+// 디스코드 웹훅 주소는 discord.com/api/webhooks/ 모양만 허용(다른 곳으로 새지 않게)
+function discordUrl_() {
+  const u = (PropertiesService.getScriptProperties().getProperty('DISCORD_WEBHOOK_URL') || '').trim();
+  return /^https:\/\/(discord|discordapp)\.com\/api\/webhooks\/\d+\/[\w-]+$/.test(u) ? u : '';
 }
 function fmt_(p) { const a = Math.abs(p), d = a >= 100 ? 0 : a >= 1 ? 2 : 4; return Number(p).toLocaleString('ko-KR', { minimumFractionDigits: d, maximumFractionDigits: d }); }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }

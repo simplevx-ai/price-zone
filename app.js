@@ -1,13 +1,13 @@
 /* 가격 위치 — 코인(업비트) 매수 검토 구간 공부용 앱
  * - 시세: 업비트 공개 시세 API(키 없음, 조회만). 주문 기능 없음.
  * - 구간 계산: zones.js(앱 안에서 계산)
- * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 10분마다 현재가를 보고 구간에 들어오면 텔레그램으로 알림.
- *   텔레그램 봇 토큰은 스크립트 속성에만 있고 폰에는 없다.
+ * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 10분마다 현재가를 보고 구간에 들어오면 텔레그램·디스코드로 알림.
+ *   봇 토큰·디스코드 웹훅 주소는 스크립트 속성에만 있고 폰에는 없다.
  * 매수 추천이 아니라 가격 위치를 공부하기 위한 도구다.
  */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const UPBIT = 'https://api.upbit.com/v1';
 const TFS = { day: { unit: 'days', label: '일봉', name: '일' }, h4: { unit: 'minutes/240', label: '4시간봉', name: '4시간' }, h1: { unit: 'minutes/60', label: '1시간봉', name: '1시간' } };
 const DEFAULT_WATCH = [{ market: 'KRW-BTC', name: '비트코인' }, { market: 'KRW-ETH', name: '이더리움' }, { market: 'KRW-XRP', name: '리플' }];
@@ -176,7 +176,7 @@ async function viewCoin(market) {
       <div class="muted" style="font-size:11px;margin-top:4px">빨강 상승·파랑 하락 봉 · 선: <span style="color:#E8A317">60</span>/<span style="color:#8E5CF0">120</span>/<span style="color:#1F9D63">200</span>봉 평균 · 칠한 띠: 검토 구간(진할수록 근거 많음)</div></div>
     <div id="sum" class="card"><div class="muted">계산 중…</div></div>
     <div id="zs"></div>
-    <div class="card"><div class="row spread"><b>🔔 텔레그램 알림</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
+    <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다(10분마다 확인). 구간은 앱을 열 때 6시간마다 새로 계산해 저장합니다.</div></div>
     ${watch.some((x) => x.market === market) ? '<button class="btn block danger" id="del" type="button">관심 코인에서 빼기</button>' : `<button class="btn block primary" id="addw" type="button">관심 코인에 추가</button>`}
     <div class="disc">공부용 · 매수 추천 아님 · 시세: 업비트</div>`;
@@ -269,8 +269,8 @@ function viewLearn() {
 async function viewSettings() {
   setTitle('설정');
   const cfg = await KV.get('relay', {}), last = await KV.get('lastSync', null);
-  view().innerHTML = `<div class="card"><h2>텔레그램 알림 연결</h2>
-      <div class="muted" style="font-size:13px">구글 Apps Script에 올린 알림 스크립트의 웹 앱 주소와, 스크립트 속성 APP_KEY와 같은 값을 넣으세요. 텔레그램 봇 토큰은 스크립트에만 있고 폰에는 저장되지 않습니다. <a href="alert/" target="_blank" rel="noopener">준비 순서 보기</a></div>
+  view().innerHTML = `<div class="card"><h2>알림 연결 (텔레그램·디스코드)</h2>
+      <div class="muted" style="font-size:13px">구글 Apps Script에 올린 알림 스크립트의 웹 앱 주소와, 스크립트 속성 APP_KEY와 같은 값을 넣으세요. 텔레그램 봇 토큰·디스코드 웹훅 주소는 스크립트에만 있고 폰에는 저장되지 않습니다. <a href="alert/" target="_blank" rel="noopener">준비 순서 보기</a></div>
       <label for="r_url">알림 스크립트 웹 앱 주소</label><input id="r_url" value="${esc(cfg.url || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
       <label for="r_key">앱 키 (APP_KEY)</label><input id="r_key" type="password" value="${esc(cfg.key || '')}" autocomplete="off">
       <div class="row wrap" style="margin-top:10px"><button class="btn primary" id="r_save" type="button">저장하고 연결 확인</button><button class="btn" id="r_test" type="button">테스트 알림 보내기</button><button class="btn" id="r_sync" type="button">구간 지금 저장</button></div>
@@ -290,10 +290,10 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      res(`<div class="okbox" style="margin-top:0">✅ 연결됨 · 텔레그램 ${d.telegram ? '설정됨' : '<span style="color:var(--red)">봇 토큰·채팅 ID 없음</span>'} · 자동 확인 ${d.trigger ? '켜짐(10분마다)' : '<span style="color:var(--red)">꺼짐 — 스크립트에서 알림켜기 실행</span>'} · 저장된 코인 ${d.watching}개</div>`);
+      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'}${d.telegram || d.discord ? '' : ' <span style="color:var(--red)">(받을 곳이 없음)</span>'} · 자동 확인 ${d.trigger ? '켜짐(10분마다)' : '<span style="color:var(--red)">꺼짐 — 스크립트에서 알림켜기 실행</span>'} · 저장된 코인 ${d.watching}개</div>`);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };
-  $('#r_test').onclick = async () => { try { await relay('test'); toast('테스트 알림을 보냈습니다. 텔레그램을 확인하세요'); } catch (e) { alert(e.message); } };
+  $('#r_test').onclick = async () => { try { const d = await relay('test'); const s = d.sent || {}; toast(`테스트 알림 보냄: ${(s.done || []).join('·') || '확인 필요'}${(s.fail || []).length ? ' / 실패: ' + s.fail.join('·') : ''}`); } catch (e) { alert(e.message); } };
   $('#r_sync').onclick = async () => { try { await syncAlerts(); render(); } catch (e) { alert(e.message); } };
 }
 
