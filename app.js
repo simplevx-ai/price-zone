@@ -1,16 +1,18 @@
-/* 가격 위치 — 코인(업비트) 매수 검토 구간 공부용 앱
- * - 시세: 업비트 공개 시세 API(키 없음, 조회만). 주문 기능 없음.
- * - 구간 계산: zones.js(앱 안에서 계산)
- * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 10분마다 현재가를 보고 구간에 들어오면 텔레그램·디스코드로 알림.
- *   봇 토큰·디스코드 웹훅 주소는 스크립트 속성에만 있고 폰에는 없다.
+/* 가격 위치 — 국내주식·해외주식·코인·코인선물·해외선물 매수 검토 구간 공부용 앱
+ * - 시세 출처: sources.js (모두 '조회'만, 주문·계좌 기능 없음)
+ * - 구간 계산: zones.js (앱 안에서 계산)
+ * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 현재가를 보고 구간에 들어오면 텔레그램·디스코드로 알림.
+ *   봇 토큰·웹훅·Alpha Vantage·한국투자증권 키는 스크립트 속성에만 있고 폰에는 없다.
  * 매수 추천이 아니라 가격 위치를 공부하기 위한 도구다.
  */
 'use strict';
 
-const APP_VERSION = '1.2.1';
-const UPBIT = 'https://api.upbit.com/v1';
-const TFS = { day: { unit: 'days', label: '일봉', name: '일' }, h4: { unit: 'minutes/240', label: '4시간봉', name: '4시간' }, h1: { unit: 'minutes/60', label: '1시간봉', name: '1시간' } };
-const DEFAULT_WATCH = [{ market: 'KRW-BTC', name: '비트코인' }, { market: 'KRW-ETH', name: '이더리움' }, { market: 'KRW-XRP', name: '리플' }];
+const APP_VERSION = '2.0.0';
+const DEFAULT_WATCH = [
+  { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
+  { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
+  { cat: 'cfut', sym: 'BTCUSDT', name: 'BTC 무기한', tf: 'day' },
+];
 
 /* ───────── 저장(IndexedDB 키-값) ───────── */
 const KV = (() => {
@@ -28,71 +30,25 @@ const KV = (() => {
 const $ = (s, el = document) => el.querySelector(s);
 const view = () => $('#view');
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// 코인 가격 표시: 100원 이상은 정수, 그 아래는 소수 자리
-const fmt = (p) => { if (p == null || !Number.isFinite(p)) return '-'; const a = Math.abs(p); const d = a >= 100 ? 0 : a >= 1 ? 2 : a >= 0.01 ? 4 : 6; return p.toLocaleString('ko-KR', { minimumFractionDigits: d, maximumFractionDigits: d }); };
-const pct = (x, sign = true) => (x == null || !Number.isFinite(x) ? '-' : `${sign && x > 0 ? '+' : ''}${x.toFixed(2)}%`);
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('on'), 2400); }
+const pct = (x) => (x == null || !Number.isFinite(x) ? '-' : `${x > 0 ? '+' : ''}${x.toFixed(2)}%`);
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove('on'), 2600); }
 function setTitle(t, back) { $('#title').textContent = t; $('#backBtn').hidden = !back; }
 const nowISO = () => new Date().toISOString();
-
-/* ───────── 업비트 공개 시세 ───────── */
-// 업비트는 브라우저에서 직접 보낸 요청(Origin 헤더 있음)을 10초에 1번만 허용한다.
-// 그래서 알림 스크립트가 연결돼 있으면 스크립트를 거쳐 받고(제한 없음), 없으면 10초 간격으로 차례로 받는다.
-const cache = new Map();
-let directQ = Promise.resolve(), lastDirect = 0;
-try { lastDirect = +localStorage.getItem('pz_lastDirect') || 0; } catch { /* 저장 안 돼도 됨 */ } // 새로고침해도 10초 간격 유지
-const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
-async function upbitDirect(path, tries = 0) {
-  const wait = Math.max(0, lastDirect + 10500 - Date.now());
-  if (wait) { busy(`업비트 제한 때문에 ${Math.ceil(wait / 1000)}초 기다리는 중… (설정에서 스크립트를 연결하면 빨라집니다)`); await sleep(wait); }
-  lastDirect = Date.now();
-  try { localStorage.setItem('pz_lastDirect', String(lastDirect)); } catch { /* 무시 */ }
-  let r;
-  try { r = await fetch(UPBIT + path); } catch { throw new Error('업비트에 연결하지 못했습니다(인터넷 확인)'); }
-  if (r.status === 429 && tries < 2) return upbitDirect(path, tries + 1);
-  if (!r.ok) throw new Error('업비트 응답 오류 ' + r.status);
-  return r.json();
-}
-async function upbit(path) {
-  const cfg = await KV.get('relay', {});
-  if (cfg.url && cfg.key) {
-    try { const d = await relay('upbit', { path }); return d.data; } catch (e) { if (/denied|APP_KEY/.test(e.message)) throw e; /* 스크립트가 옛 버전·오류면 직접 받기로 */ }
-  }
-  const job = directQ.then(() => upbitDirect(path));
-  directQ = job.catch(() => {});
-  try { return await job; } finally { busy(''); }
-}
+const idOf = (a) => `${a.cat}:${a.sym}`;
+const enc = encodeURIComponent;
 function busy(msg) { let b = $('#busy'); if (!b) { b = document.createElement('div'); b.id = 'busy'; b.className = 'muted'; b.style.cssText = 'position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));text-align:center;font-size:12px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px 8px;z-index:6;box-shadow:0 2px 8px rgba(0,0,0,.15)'; document.body.appendChild(b); } b.textContent = msg; b.hidden = !msg; }
-const useRelay = async () => { const c = await KV.get('relay', {}); return !!(c.url && c.key); };
-async function markets() {
-  if (cache.has('markets')) return cache.get('markets');
-  const saved = await KV.get('markets', null);
-  if (saved && Date.now() - saved.at < 86400e3) { cache.set('markets', saved.data); return saved.data; }
-  const all = (await upbit('/market/all?isDetails=false')).filter((m) => m.market.startsWith('KRW-'));
-  cache.set('markets', all); KV.set('markets', { at: Date.now(), data: all }).catch(() => {}); return all;
-}
-// 캔들: 스크립트 연결 시 400개, 직접 받을 땐 200개(요청 1번). 폰에 저장해 두고 봉 단위별로 일정 시간 다시 씀
-const FRESH = { day: 30 * 60e3, h4: 10 * 60e3, h1: 5 * 60e3 };
-async function candles(market, tf, total) {
-  const key = `c:${market}:${tf}`, hit = cache.get(key) || (await KV.get(key, null));
-  if (hit && Date.now() - hit.at < FRESH[tf]) { cache.set(key, hit); return hit.data; }
-  if (total == null) total = (await useRelay()) ? 400 : 200;
-  let out = [], to = '';
-  while (out.length < total) {
-    const r = await upbit(`/candles/${TFS[tf].unit}?market=${market}&count=200${to ? '&to=' + encodeURIComponent(to) : ''}`);
-    if (!r.length) break;
-    out = out.concat(r);
-    if (r.length < 200) break;
-    to = r[r.length - 1].candle_date_time_utc + 'Z';
-  }
-  const data = out.reverse().map((k) => ({ t: k.timestamp, d: k.candle_date_time_kst, o: k.opening_price, h: k.high_price, l: k.low_price, c: k.trade_price, v: k.candle_acc_trade_volume }));
-  cache.set(key, { at: Date.now(), data });
-  KV.set(key, { at: Date.now(), data }).catch(() => {});
-  return data;
-}
-const tickers = (ms) => upbit('/ticker?markets=' + ms.join(','));
 
-/* ───────── 알림 중계(구글 Apps Script) ───────── */
+// 예전(코인만) 관심 목록을 새 모양으로 옮긴다
+async function getWatch() {
+  const w = await KV.get('watch', null);
+  if (!w) return DEFAULT_WATCH.map((x) => ({ ...x }));
+  const out = w.map((x) => (x.cat ? x : { cat: 'coin', sym: x.market, name: x.name, tf: x.tf || 'day', alert: x.alert }));
+  return out;
+}
+const setWatch = (w) => KV.set('watch', w);
+
+/* ───────── 중계 스크립트(구글 Apps Script) ───────── */
+async function relayOn() { const c = await KV.get('relay', {}); return !!(c.url && c.key); }
 async function relay(action, extra) {
   const cfg = await KV.get('relay', {});
   if (!cfg.url || !cfg.key) throw new Error('설정에서 알림 스크립트 주소와 앱 키를 먼저 넣어 주세요');
@@ -102,27 +58,49 @@ async function relay(action, extra) {
   if (d.ok === false) throw new Error(d.error === 'denied' ? '앱 키가 스크립트의 APP_KEY와 다릅니다' : d.error || '오류');
   return d;
 }
-// 알림 켠 코인들의 구간을 다시 계산해 스크립트에 저장
+
+/* ───────── 캔들(폰에 저장해 두고 봉 단위별로 다시 씀) ───────── */
+const mem = new Map();
+async function candles(a, tf) {
+  const key = `c:${idOf(a)}:${tf}`, hit = mem.get(key) || (await KV.get(key, null));
+  if (hit && Date.now() - hit.at < FRESH[tf]) { mem.set(key, hit); return hit.data; }
+  const data = await fetchCandles(a, tf);
+  const v = { at: Date.now(), data };
+  mem.set(key, v); KV.set(key, v).catch(() => {});
+  return data;
+}
+// 이 종목을 보려면 필요한 키가 스크립트에 있는지
+async function needMsg(cat) {
+  const n = CATS[cat].needs;
+  if (!n) return '';
+  if (!(await relayOn())) return `설정에서 스크립트를 연결하고 ${NEED_LABEL[n]}를 넣어야 볼 수 있습니다`;
+  const st = await KV.get('relayStatus', {});
+  if (st.checkedAt && st[n] === false) return `스크립트 속성에 ${NEED_LABEL[n]}가 아직 없습니다`;
+  return '';
+}
+
+// 알림 켠 종목들의 구간을 다시 계산해 스크립트에 저장
 async function syncAlerts(silent) {
-  const watch = await KV.get('watch', DEFAULT_WATCH);
-  const on = watch.filter((w) => w.alert);
+  const on = (await getWatch()).filter((w) => w.alert);
   const items = [];
   for (const w of on) {
-    const tf = w.tf || 'day';
-    const r = ZoneMath.analyze(await candles(w.market, tf));
-    if (r.error) continue;
-    items.push({ market: w.market, name: w.name, tf: TFS[tf].label, price: r.price, zones: r.zones.map((z) => ({ low: z.low, high: z.high, score: z.score, labels: [...new Set(z.items.map((x) => x.label))] })) });
+    try {
+      const r = ZoneMath.analyze(await candles(w, w.tf || 'day'));
+      if (r.error) continue;
+      items.push({ cat: w.cat, sym: w.sym, ex: w.ex || '', name: w.name, tf: TFS[w.tf || 'day'].label, price: r.price, zones: r.zones.map((z) => ({ low: z.low, high: z.high, score: z.score, labels: [...new Set(z.items.map((x) => x.label))] })) });
+    } catch { /* 한 종목 실패해도 나머지는 저장 */ }
   }
   const d = await relay('saveWatch', { items });
   await KV.set('lastSync', nowISO());
-  if (!silent) toast(`알림 구간 저장: 코인 ${items.length}개 · 구간 ${d.zones}개`);
+  if (!silent) toast(`알림 구간 저장: ${items.length}종목 · 구간 ${d.zones}개`);
   return d;
 }
 
 /* ───────── 라우터 ───────── */
 const routes = [
   [/^#?\/?$/, 'list', viewList],
-  [/^#\/c\/(KRW-[\w]+)$/, 'list', (m) => viewCoin(m[1])],
+  [/^#\/a\/(\w+)\/([^/]+)$/, 'list', (m) => viewAsset(m[1], decodeURIComponent(m[2]))],
+  [/^#\/c\/(KRW-[\w]+)$/, 'list', (m) => viewAsset('coin', m[1])], // 예전 주소
   [/^#\/add$/, 'list', viewAdd],
   [/^#\/learn$/, 'learn', viewLearn],
   [/^#\/settings$/, 'settings', viewSettings],
@@ -142,105 +120,153 @@ async function render() {
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 $('#backBtn').addEventListener('click', () => (history.length > 1 ? history.back() : (location.hash = '#/')));
 
-/* ───────── 관심 코인 목록 ───────── */
+/* ───────── 관심 종목 목록(카테고리별) ───────── */
+const catChips = (sel, withAll) => `<div class="chips" role="tablist">${withAll ? `<button class="chip${sel === 'all' ? ' on' : ''}" data-cat="all" type="button">전체</button>` : ''}${Object.entries(CATS).map(([k, c]) => `<button class="chip${sel === k ? ' on' : ''}" data-cat="${k}" type="button">${c.icon} ${c.label}</button>`).join('')}</div>`;
 async function viewList() {
   setTitle('가격 위치');
-  const watch = await KV.get('watch', DEFAULT_WATCH);
-  view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">📘 공부용 도구입니다. 여러 근거가 겹치는 가격대를 보여 줄 뿐 <b>매수 추천이 아니며</b>, 결정과 책임은 본인에게 있습니다.</div>
-    <div id="ls">${watch.map((w) => `<a class="coin" href="#/c/${w.market}" data-m="${w.market}"><div class="row spread"><span class="nm">${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.market.slice(4))}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">불러오는 중…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || '<div class="empty">관심 코인이 없습니다.</div>'}</div>
-    <a class="btn block" href="#/add">+ 코인 추가</a>
-    <div class="disc">시세: 업비트 공개 API · v${APP_VERSION}</div>`;
-  if (!watch.length) return;
-  try {
-    const tk = await tickers(watch.map((w) => w.market));
-    for (const t of tk) {
-      const el = view().querySelector(`[data-m="${t.market}"]`); if (!el) continue;
-      const ch = t.signed_change_rate * 100;
-      el.querySelector('.px').className = 'px ' + (ch > 0 ? 'up' : ch < 0 ? 'down' : '');
-      el.querySelector('.px').innerHTML = `<b>${fmt(t.trade_price)}</b> ${pct(ch)}`;
-    }
-  } catch (e) { toast(e.message); }
-  // 구간 요약(코인마다 차례로)
-  for (const w of watch) {
-    const el = view().querySelector(`[data-m="${w.market}"] .info span:last-child`); if (!el) continue;
-    try {
-      const r = ZoneMath.analyze(await candles(w.market, w.tf || 'day'));
-      if (r.error) { el.textContent = r.error; continue; }
-      const inside = r.zones.find((z) => r.price >= z.low && r.price <= z.high);
-      const near = r.zones[0];
-      el.innerHTML = inside ? '<b style="color:#E8A317">검토 구간 안</b>' : near ? `가까운 구간 ${pct(((near.high - r.price) / r.price) * 100)}` : '아래 겹치는 구간 없음';
-      el.innerHTML += ` · RSI ${r.rsi != null ? r.rsi.toFixed(0) : '-'}`;
-    } catch (e) { el.textContent = e.message; }
-  }
-  // 알림 켠 코인이 있으면 6시간마다 구간을 다시 저장
-  const last = await KV.get('lastSync', null), cfg = await KV.get('relay', {});
-  if (cfg.url && watch.some((w) => w.alert) && (!last || Date.now() - Date.parse(last) > 6 * 3600e3)) syncAlerts(true).catch(() => {});
-}
-
-async function viewAdd() {
-  setTitle('코인 추가', true);
-  const watch = await KV.get('watch', DEFAULT_WATCH);
-  view().innerHTML = `<div class="card"><input id="q" placeholder="코인 이름이나 기호 (예: 솔라나, SOL)" autocomplete="off"><div class="pick" id="pk"><div class="muted" style="padding:10px">불러오는 중…</div></div></div>`;
-  const all = await markets();
-  const draw = () => {
-    const q = $('#q').value.trim().toUpperCase();
-    const L = all.filter((m) => !q || m.korean_name.toUpperCase().includes(q) || m.market.slice(4).includes(q) || m.english_name.toUpperCase().includes(q)).slice(0, 60);
-    $('#pk').innerHTML = L.map((m) => { const has = watch.some((w) => w.market === m.market); return `<button type="button" data-m="${m.market}" data-n="${esc(m.korean_name)}" ${has ? 'disabled' : ''}><span>${esc(m.korean_name)} <span class="muted">${esc(m.market.slice(4))}</span></span><span>${has ? '추가됨' : '+'}</span></button>`; }).join('') || '<div class="muted" style="padding:10px">찾는 코인이 없습니다.</div>';
-    $('#pk').querySelectorAll('[data-m]').forEach((b) => { b.onclick = async () => { watch.push({ market: b.dataset.m, name: b.dataset.n, tf: 'day' }); await KV.set('watch', watch); toast(`${b.dataset.n} 추가`); location.hash = '#/c/' + b.dataset.m; }; });
+  const watch = await getWatch();
+  let sel = sessionStorage.getItem('pzCat') || 'all';
+  const draw = async () => {
+    const L = watch.filter((w) => sel === 'all' || w.cat === sel);
+    view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">📘 공부용 도구입니다. 여러 근거가 겹치는 가격대를 보여 줄 뿐 <b>매수 추천이 아니며</b>, 결정과 책임은 본인에게 있습니다.</div>
+      ${catChips(sel, true)}
+      <div id="ls">${L.map((w) => `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
+      <a class="btn block" href="#/add">+ 종목 추가</a>
+      <div class="disc">시세: 업비트·바이낸스(공개) · Alpha Vantage · 한국투자증권 · v${APP_VERSION}</div>`;
+    view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { sel = b.dataset.cat; sessionStorage.setItem('pzCat', sel); draw(); }; });
+    // 현재가(코인·코인선물은 바로, 나머지는 캔들 마지막 값)
+    const q = {};
+    const showPx = (w, price, chg) => { const el = view().querySelector(`[data-id="${CSS.escape(idOf(w))}"] .px`); if (!el) return; el.className = 'px ' + (chg > 0 ? 'up' : chg < 0 ? 'down' : ''); el.innerHTML = `<b>${fmtP(price, w.cat)}</b> ${pct(chg)}`; };
+    // 현재가는 기다리지 않고 따로 채운다(업비트 직접 받기가 10초씩 걸려도 다른 종목은 먼저 보이게)
+    quotes(L).then((res) => { Object.assign(q, res); for (const w of L) { const qq = q[idOf(w)]; if (qq) showPx(w, qq.price, qq.chg); } }).catch(() => {});
+    // 구간 요약(출처가 다르면 동시에 — 업비트 직접 받기만 안에서 차례로)
+    await Promise.all(L.map(async (w) => {
+      const el = view().querySelector(`[data-id="${CSS.escape(idOf(w))}"]`); if (!el) return;
+      const info = el.querySelector('.info span:last-child');
+      const nm = await needMsg(w.cat);
+      if (nm) { info.textContent = '🔑 ' + nm.replace(/를 넣어야 볼 수 있습니다|가 아직 없습니다/, ' 필요'); return; }
+      try {
+        const cs = await candles(w, w.tf || 'day');
+        const r = ZoneMath.analyze(cs);
+        if (!q[idOf(w)] && cs.length > 1) showPx(w, cs[cs.length - 1].c, ((cs[cs.length - 1].c - cs[cs.length - 2].c) / cs[cs.length - 2].c) * 100);
+        if (r.error) { info.textContent = r.error; return; }
+        const inside = r.zones.find((z) => r.price >= z.low && r.price <= z.high);
+        info.innerHTML = (inside ? '<b style="color:#E8A317">검토 구간 안</b>' : r.zones[0] ? `가까운 구간 ${pct(((r.zones[0].high - r.price) / r.price) * 100)}` : '아래 겹치는 구간 없음') + ` · RSI ${r.rsi != null ? r.rsi.toFixed(0) : '-'}`;
+      } catch (e) { info.textContent = e.message; }
+    }));
   };
-  $('#q').oninput = draw; draw(); $('#q').focus();
+  await draw();
+  const last = await KV.get('lastSync', null);
+  if ((await relayOn()) && watch.some((w) => w.alert) && (!last || Date.now() - Date.parse(last) > 6 * 3600e3)) syncAlerts(true).catch(() => {});
 }
 
-/* ───────── 코인 상세: 차트·구간·근거 ───────── */
-async function viewCoin(market) {
-  const watch = await KV.get('watch', DEFAULT_WATCH);
-  const w = watch.find((x) => x.market === market) || { market, name: market.slice(4), tf: 'day' };
+/* ───────── 종목 추가 ───────── */
+async function viewAdd() {
+  setTitle('종목 추가', true);
+  const watch = await getWatch();
+  let cat = sessionStorage.getItem('pzAddCat') || 'coin';
+  const add = async (x) => {
+    if (watch.some((w) => idOf(w) === `${cat}:${x.sym}`)) { toast('이미 있는 종목입니다'); return; }
+    watch.push({ cat, sym: x.sym, ex: x.ex || '', name: x.name, tf: CATS[cat].tfs[0] });
+    await setWatch(watch); toast(`${x.name} 추가`); location.hash = `#/a/${cat}/${enc(x.sym)}`;
+  };
+  const draw = async () => {
+    const c = CATS[cat];
+    const nm = await needMsg(cat);
+    const manual = cat === 'kr' || cat === 'ffut';
+    view().innerHTML = `${catChips(cat, false)}
+      ${nm ? `<div class="card warnlist" style="margin-top:0">🔑 ${esc(nm)}. 종목은 미리 추가해 둘 수 있습니다. <a href="#/settings">설정 ›</a></div>` : ''}
+      <div class="card">${manual ? `
+        <label for="m_sym">${cat === 'kr' ? '종목코드 6자리' : '종목코드(월물 포함)'}</label><input id="m_sym" placeholder="${cat === 'kr' ? '005930' : 'NQZ25'}" autocomplete="off" ${cat === 'kr' ? 'inputmode="numeric"' : ''}>
+        ${cat === 'ffut' ? '<label for="m_ex">거래소</label><input id="m_ex" placeholder="CME" autocomplete="off">' : ''}
+        <label for="m_name">이름</label><input id="m_name" placeholder="${cat === 'kr' ? '삼성전자' : '나스닥100 12월물'}">
+        <button class="btn primary block" id="m_add" type="button" style="margin-top:10px">추가</button>
+        <div class="muted" style="font-size:12px;margin-top:6px">${cat === 'kr' ? '한국투자증권 API에는 이름 검색이 없어 코드를 직접 넣습니다.' : '해외선물은 월물마다 코드가 바뀝니다(예: 나스닥100 2025년 12월물 = NQZ25). 만기가 지나면 다음 월물로 다시 추가하세요.'}</div>`
+      : `<input id="q" placeholder="${esc(c.hint || '이름이나 기호')}" autocomplete="off"><div class="pick" id="pk"><div class="muted" style="padding:10px">${cat === 'us' ? '티커나 회사 이름을 입력하세요' : '불러오는 중…'}</div></div>`}</div>`;
+    view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { cat = b.dataset.cat; sessionStorage.setItem('pzAddCat', cat); draw(); }; });
+    if (manual) {
+      $('#m_add').onclick = () => {
+        const sym = $('#m_sym').value.trim().toUpperCase(), name = $('#m_name').value.trim() || sym, ex = $('#m_ex') ? $('#m_ex').value.trim().toUpperCase() : '';
+        if (cat === 'kr' && !/^\d{6}$/.test(sym)) { alert('종목코드는 숫자 6자리입니다'); return; }
+        if (cat === 'ffut' && (!/^[A-Z0-9]{2,12}$/.test(sym) || !/^[A-Z]{2,8}$/.test(ex))) { alert('종목코드와 거래소를 확인해 주세요 (예: NQZ25 / CME)'); return; }
+        add({ sym, name, ex });
+      };
+      return;
+    }
+    let tmr;
+    const run = async () => {
+      const q = $('#q').value;
+      if (cat === 'us' && !q.trim()) return;
+      $('#pk').innerHTML = '<div class="muted" style="padding:10px">찾는 중…</div>';
+      try {
+        const L = await searchAssets(cat, q);
+        $('#pk').innerHTML = L.map((x, i) => { const has = watch.some((w) => idOf(w) === `${cat}:${x.sym}`); return `<button type="button" data-i="${i}" ${has ? 'disabled' : ''}><span>${esc(x.name)} <span class="muted">${esc(x.sub)}</span></span><span>${has ? '추가됨' : '+'}</span></button>`; }).join('') || '<div class="muted" style="padding:10px">찾는 종목이 없습니다.</div>';
+        $('#pk').querySelectorAll('[data-i]').forEach((b) => { b.onclick = () => add(L[+b.dataset.i]); });
+      } catch (e) { $('#pk').innerHTML = `<div class="errbox" style="margin:8px">${esc(e.message)}</div>`; }
+    };
+    $('#q').oninput = () => { clearTimeout(tmr); tmr = setTimeout(run, cat === 'us' ? 700 : 150); };
+    if (cat !== 'us') run();
+    $('#q').focus();
+  };
+  draw();
+}
+
+/* ───────── 종목 상세: 차트·구간·근거 ───────── */
+async function viewAsset(cat, sym) {
+  if (!CATS[cat]) { location.hash = '#/'; return; }
+  const watch = await getWatch();
+  const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym, tf: CATS[cat].tfs[0] };
+  const inList = watch.some((x) => x.cat === cat && x.sym === sym);
   setTitle(w.name, true);
-  const tf = w.tf || 'day';
-  view().innerHTML = `<div class="seg" role="radiogroup" aria-label="봉 단위">${Object.entries(TFS).map(([k, v]) => `<label><input type="radio" name="tf" value="${k}"${k === tf ? ' checked' : ''}><span>${v.label}</span></label>`).join('')}</div>
+  const tf = CATS[cat].tfs.includes(w.tf) ? w.tf : CATS[cat].tfs[0];
+  view().innerHTML = `${CATS[cat].tfs.length > 1 ? `<div class="seg" role="radiogroup" aria-label="봉 단위">${CATS[cat].tfs.map((k) => `<label><input type="radio" name="tf" value="${k}"${k === tf ? ' checked' : ''}><span>${TFS[k].label}</span></label>`).join('')}</div>` : ''}
     <div class="card" style="margin-top:10px;padding:8px"><canvas class="chart" id="cv" aria-label="가격 차트와 검토 구간"></canvas>
       <div class="muted" style="font-size:11px;margin-top:4px">빨강 상승·파랑 하락 봉 · 선: <span style="color:#E8A317">60</span>/<span style="color:#8E5CF0">120</span>/<span style="color:#1F9D63">200</span>봉 평균 · 칠한 띠: 검토 구간(진할수록 근거 많음)</div></div>
     <div id="sum" class="card"><div class="muted">계산 중…</div></div>
     <div id="zs"></div>
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
-      <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다(10분마다 확인). 구간은 앱을 열 때 6시간마다 새로 계산해 저장합니다.</div></div>
-    ${watch.some((x) => x.market === market) ? '<button class="btn block danger" id="del" type="button">관심 코인에서 빼기</button>' : `<button class="btn block primary" id="addw" type="button">관심 코인에 추가</button>`}
-    <div class="disc">공부용 · 매수 추천 아님 · 시세: 업비트</div>`;
-  const save = async (patch) => { const ws = await KV.get('watch', DEFAULT_WATCH); const i = ws.findIndex((x) => x.market === market); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await KV.set('watch', ws); } };
+      <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때 6시간마다 새로 계산해 저장합니다.</div></div>
+    ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
+    <div class="disc">공부용 · 매수 추천 아님 · ${CATS[cat].label}</div>`;
+  const save = async (patch) => { const ws = await getWatch(); const i = ws.findIndex((x) => x.cat === cat && x.sym === sym); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await setWatch(ws); } };
   view().querySelectorAll('[name=tf]').forEach((el) => { el.onchange = async () => { await save({ tf: el.value }); render(); }; });
-  if ($('#del')) $('#del').onclick = async () => { if (!confirm(`${w.name}을(를) 관심 코인에서 뺄까요?`)) return; await KV.set('watch', (await KV.get('watch', DEFAULT_WATCH)).filter((x) => x.market !== market)); location.hash = '#/'; };
-  if ($('#addw')) $('#addw').onclick = async () => { const ws = await KV.get('watch', DEFAULT_WATCH); ws.push({ market, name: w.name, tf }); await KV.set('watch', ws); render(); };
+  if ($('#del')) $('#del').onclick = async () => { if (!confirm(`${w.name}을(를) 관심 종목에서 뺄까요?`)) return; await setWatch((await getWatch()).filter((x) => !(x.cat === cat && x.sym === sym))); location.hash = '#/'; };
+  if ($('#addw')) $('#addw').onclick = async () => { const ws = await getWatch(); ws.push({ ...w, tf }); await setWatch(ws); render(); };
   $('#al').onchange = async (e) => {
-    if (!watch.some((x) => x.market === market)) { e.target.checked = false; toast('관심 코인에 먼저 추가하세요'); return; }
-    const cfg = await KV.get('relay', {});
-    if (e.target.checked && !cfg.url) { e.target.checked = false; alert('설정에서 알림 스크립트를 먼저 연결해 주세요'); location.hash = '#/settings'; return; }
+    if (!inList) { e.target.checked = false; toast('관심 종목에 먼저 추가하세요'); return; }
+    if (e.target.checked && !(await relayOn())) { e.target.checked = false; alert('설정에서 알림 스크립트를 먼저 연결해 주세요'); location.hash = '#/settings'; return; }
     await save({ alert: e.target.checked });
     try { await syncAlerts(); } catch (err) { alert('알림 저장 실패: ' + err.message); }
   };
 
-  const cs = await candles(market, tf);
+  const nm = await needMsg(cat);
+  if (nm) { $('#sum').innerHTML = `<div class="warnlist" style="margin-top:0">🔑 ${esc(nm)}. <a href="#/settings">설정 ›</a></div>`; return; }
+  let cs;
+  try { cs = await candles(w, tf); } catch (e) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`; return; }
   const r = ZoneMath.analyze(cs);
   if (r.error) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(r.error)}</div>`; return; }
-  drawChart($('#cv'), cs, r);
+  const f = (p) => fmtP(p, cat), u = unitOf(cat);
+  drawChart($('#cv'), cs, r, f);
   const inside = r.zones.find((z) => r.price >= z.low && r.price <= z.high);
-  $('#sum').innerHTML = `<div class="row spread"><span>현재가</span><b style="font-size:20px">${fmt(r.price)}원</b></div>
-    <div class="muted" style="font-size:13px;margin-top:6px">최근 ${r.range.bars}${TFS[tf].name}봉 범위 안 위치 (저점 ${fmt(r.range.low)} ~ 고점 ${fmt(r.range.high)})</div>
+  $('#sum').innerHTML = `<div class="row spread"><span>현재가</span><b style="font-size:20px">${f(r.price)}${u ? ' ' + u : ''}</b></div>
+    <div class="muted" style="font-size:13px;margin-top:6px">최근 ${r.range.bars}${TFS[tf].name}봉 범위 안 위치 (저점 ${f(r.range.low)} ~ 고점 ${f(r.range.high)})</div>
     <div class="posbar"><i style="left:${Math.max(0, Math.min(100, r.range.pos || 0))}%"></i></div><div class="row spread muted" style="font-size:12px"><span>저점</span><b>${r.range.pos != null ? r.range.pos.toFixed(0) + '%' : '-'}</b><span>고점</span></div>
     <div class="grid2" style="margin-top:8px;font-size:14px"><div>RSI(14) <b>${r.rsi != null ? r.rsi.toFixed(1) : '-'}</b> <span class="muted">${r.rsi < 30 ? '과매도' : r.rsi > 70 ? '과매수' : '보통'}</span></div><div>${esc(r.trend)}</div></div>
+    ${cs.length < 200 ? `<div class="muted" style="font-size:12px;margin-top:6px">봉 ${cs.length}개로 계산했습니다${cat === 'us' && tf === 'day' ? '(무료 키는 일봉 최근 100개까지 — 긴 흐름은 주봉으로 보세요)' : ''}. 120·200봉 평균은 봉이 부족하면 빠집니다.</div>` : ''}
     ${inside ? `<div class="okbox" style="border-color:#E8A317;color:#B26B00">현재가가 검토 구간 안에 있습니다 (근거 ${inside.kinds}개)</div>` : ''}`;
   const zh = r.zones.map((z, i) => `<div class="zone ${z.score >= 3 ? 's3' : ''} ${r.price >= z.low && r.price <= z.high ? 'in' : ''}">
-      <div class="row spread"><span class="rng">${fmt(z.low)} ~ ${fmt(z.high)}</span><span>${'★'.repeat(Math.min(5, Math.round(z.score)))} <span class="muted" style="font-size:12px">${z.score}</span></span></div>
+      <div class="row spread"><span class="rng">${f(z.low)} ~ ${f(z.high)}</span><span>${'★'.repeat(Math.min(5, Math.round(z.score)))} <span class="muted" style="font-size:12px">${z.score}</span></span></div>
       <div class="muted" style="font-size:13px">구간 ${i + 1} · 현재가 대비 ${pct(((z.high - r.price) / r.price) * 100)} · 근거 ${z.kinds}가지</div>
-      <ul>${z.items.map((x) => `<li><b>${esc(x.label)}</b> ${fmt(x.p)}${x.touches > 1 ? ` <span class="muted">(${x.touches}번 반등)</span>` : ''}</li>`).join('')}</ul></div>`).join('');
+      <ul>${z.items.map((x) => `<li><b>${esc(x.label)}</b> ${f(x.p)}${x.touches > 1 ? ` <span class="muted">(${x.touches}번 반등)</span>` : ''}</li>`).join('')}</ul></div>`).join('');
   const singles = r.candidates.filter((x) => x.p < r.price && !r.zones.some((z) => x.p >= z.low && x.p <= z.high)).sort((a, b) => b.p - a.p).slice(0, 5);
   $('#zs').innerHTML = `<div class="card"><h2>검토 구간 <span class="muted">(근거 2가지 이상 겹침)</span></h2>
       ${zh || '<div class="muted">현재가 아래에 근거가 2가지 이상 겹치는 구간이 없습니다. 최근 범위의 바닥 근처이거나 근거가 흩어져 있다는 뜻입니다.</div>'}
-      ${singles.length ? `<div style="margin-top:10px"><b style="font-size:14px">근거 하나뿐인 아래 가격</b><ul style="font-size:13px;margin:6px 0 0;padding-left:18px">${singles.map((x) => `<li>${esc(x.label)} ${fmt(x.p)} <span class="muted">(${pct(((x.p - r.price) / r.price) * 100)})</span></li>`).join('')}</ul></div>` : ''}
+      ${singles.length ? `<div style="margin-top:10px"><b style="font-size:14px">근거 하나뿐인 아래 가격</b><ul style="font-size:13px;margin:6px 0 0;padding-left:18px">${singles.map((x) => `<li>${esc(x.label)} ${f(x.p)} <span class="muted">(${pct(((x.p - r.price) / r.price) * 100)})</span></li>`).join('')}</ul></div>` : ''}
       <a href="#/learn" style="font-size:13px;display:inline-block;margin-top:8px">각 근거가 무슨 뜻인지 보기 ›</a></div>`;
 }
 
 // 캔들 차트 + 이동평균 + 검토 구간 띠 + 현재가 선
-function drawChart(cv, cs, r) {
+function drawChart(cv, cs, r, f) {
   const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   cv.width = W * dpr; cv.height = H * dpr;
   const g = cv.getContext('2d'); g.scale(dpr, dpr);
@@ -248,33 +274,24 @@ function drawChart(cv, cs, r) {
   const N = Math.min(150, cs.length), s = cs.length - N, show = cs.slice(s);
   let lo = Math.min(...show.map((k) => k.l), ...r.zones.map((z) => z.low)), hi = Math.max(...show.map((k) => k.h));
   const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
-  const R = 58, cw = (W - R) / N, y = (p) => 8 + (1 - (p - lo) / (hi - lo)) * (H - 24);
+  const R = 62, cw = (W - R) / N, y = (p) => 8 + (1 - (p - lo) / (hi - lo)) * (H - 24);
   g.fillStyle = dark ? '#182033' : '#FFFFFF'; g.fillRect(0, 0, W, H);
-  // 구간 띠
-  for (const z of r.zones) {
-    const a = z.score >= 3 ? 0.30 : 0.18;
-    g.fillStyle = `rgba(232,163,23,${a})`; g.fillRect(0, y(z.high), W - R, Math.max(2, y(z.low) - y(z.high)));
-  }
-  // 가격 눈금
+  for (const z of r.zones) { g.fillStyle = `rgba(232,163,23,${z.score >= 3 ? 0.30 : 0.18})`; g.fillRect(0, y(z.high), W - R, Math.max(2, y(z.low) - y(z.high))); }
   g.fillStyle = dark ? '#9AA4BC' : '#66708A'; g.font = '10px sans-serif'; g.textAlign = 'left'; g.strokeStyle = dark ? '#2A3450' : '#EEF1F6'; g.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) { const p = lo + ((hi - lo) * i) / 4, yy = y(p); g.beginPath(); g.moveTo(0, yy); g.lineTo(W - R, yy); g.stroke(); g.fillText(fmt(p), W - R + 4, yy + 3); }
-  // 이동평균
+  for (let i = 0; i <= 4; i++) { const p = lo + ((hi - lo) * i) / 4, yy = y(p); g.beginPath(); g.moveTo(0, yy); g.lineTo(W - R, yy); g.stroke(); g.fillText(f(p), W - R + 4, yy + 3); }
   for (const [m, col] of [[60, '#E8A317'], [120, '#8E5CF0'], [200, '#1F9D63']]) {
     const arr = r.ma[m]; g.strokeStyle = col; g.lineWidth = 1.4; g.beginPath(); let st = false;
     for (let i = 0; i < N; i++) { const v = arr[s + i]; if (v == null) continue; const xx = i * cw + cw / 2; if (!st) { g.moveTo(xx, y(v)); st = true; } else g.lineTo(xx, y(v)); }
     g.stroke();
   }
-  // 캔들(한국식: 상승 빨강, 하락 파랑)
   show.forEach((k, i) => {
-    const up = k.c >= k.o, col = up ? '#D63B3B' : '#2F6FE0', xx = i * cw + cw / 2;
+    const col = k.c >= k.o ? '#D63B3B' : '#2F6FE0', xx = i * cw + cw / 2;
     g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1;
     g.beginPath(); g.moveTo(xx, y(k.h)); g.lineTo(xx, y(k.l)); g.stroke();
-    const top = y(Math.max(k.o, k.c)), bh = Math.max(1, Math.abs(y(k.o) - y(k.c)));
-    g.fillRect(xx - Math.max(1, cw * 0.35), top, Math.max(1, cw * 0.7), bh);
+    g.fillRect(xx - Math.max(1, cw * 0.35), y(Math.max(k.o, k.c)), Math.max(1, cw * 0.7), Math.max(1, Math.abs(y(k.o) - y(k.c))));
   });
-  // 현재가
   g.setLineDash([4, 3]); g.strokeStyle = dark ? '#E8ECF5' : '#15203A'; g.beginPath(); g.moveTo(0, y(r.price)); g.lineTo(W - R, y(r.price)); g.stroke(); g.setLineDash([]);
-  g.fillStyle = dark ? '#E8ECF5' : '#15203A'; g.fillRect(W - R, y(r.price) - 8, R, 16); g.fillStyle = dark ? '#15203A' : '#FFFFFF'; g.fillText(fmt(r.price), W - R + 3, y(r.price) + 3);
+  g.fillStyle = dark ? '#E8ECF5' : '#15203A'; g.fillRect(W - R, y(r.price) - 8, R, 16); g.fillStyle = dark ? '#15203A' : '#FFFFFF'; g.fillText(f(r.price), W - R + 3, y(r.price) + 3);
 }
 
 /* ───────── 근거 설명 ───────── */
@@ -286,7 +303,7 @@ function viewLearn() {
       <li>가까운 근거끼리(평균 변동폭 ATR의 0.6배 안) 하나로 묶습니다.</li>
       <li>서로 <b>다른 종류의 근거가 2가지 이상</b> 겹친 묶음만 '검토 구간'으로 보여 줍니다. 이동평균 여러 개, 피보나치 여러 개는 한 종류로 칩니다.</li>
       <li>점수 = 근거 종류 수(+ 지지선이 여러 번 확인되면 최대 1점). 구간 폭은 ATR의 0.25배씩 넓힙니다.</li></ol>
-      <div class="warnlist">겹치는 근거가 많아도 가격은 더 내려갈 수 있습니다. 구간은 '많은 사람이 보는 자리'일 뿐 바닥 보장이 아닙니다. 손절 기준과 나눠 사기 계획을 따로 정해 두세요.</div></div>
+      <div class="warnlist">겹치는 근거가 많아도 가격은 더 내려갈 수 있습니다. 구간은 '많은 사람이 보는 자리'일 뿐 바닥 보장이 아닙니다. 선물은 레버리지 때문에 손실이 원금보다 커질 수 있습니다. 손절 기준과 나눠 사기 계획을 따로 정해 두세요.</div></div>
     ${keys.map((k) => `<div class="card"><b>${esc(ZoneMath.LABEL[k])}</b><div class="muted" style="margin-top:4px">${esc(ZoneMath.WHY[k])}</div></div>`).join('')}
     <div class="card"><b>ATR (평균 변동폭)</b><div class="muted" style="margin-top:4px">최근 14개 봉의 평균 움직임 크기입니다. 근거를 묶는 거리와 구간 폭을 정하는 데 씁니다.</div></div>`;
 }
@@ -294,18 +311,26 @@ function viewLearn() {
 /* ───────── 설정 ───────── */
 async function viewSettings() {
   setTitle('설정');
-  const cfg = await KV.get('relay', {}), last = await KV.get('lastSync', null);
-  view().innerHTML = `<div class="card"><h2>알림 연결 (텔레그램·디스코드)</h2>
-      <div class="muted" style="font-size:13px">구글 Apps Script에 올린 알림 스크립트의 웹 앱 주소와, 스크립트 속성 APP_KEY와 같은 값을 넣으세요. 텔레그램 봇 토큰·디스코드 웹훅 주소는 스크립트에만 있고 폰에는 저장되지 않습니다. <a href="alert/" target="_blank" rel="noopener">준비 순서 보기</a></div>
-      <label for="r_url">알림 스크립트 웹 앱 주소</label><input id="r_url" value="${esc(cfg.url || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
+  const cfg = await KV.get('relay', {}), last = await KV.get('lastSync', null), st = await KV.get('relayStatus', {});
+  const stRow = (ok, t) => `<div style="font-size:14px">${ok ? '✅' : ok === false ? '⬜' : '❔'} ${t}</div>`;
+  view().innerHTML = `<div class="card"><h2>스크립트 연결 (알림·시세 중계)</h2>
+      <div class="muted" style="font-size:13px">구글 Apps Script 웹 앱 주소와 스크립트 속성 APP_KEY와 같은 값을 넣으세요. 봇 토큰·웹훅·Alpha Vantage·한국투자증권 키는 스크립트에만 있고 폰에는 저장되지 않습니다. <a href="alert/" target="_blank" rel="noopener">준비 순서 보기</a></div>
+      <label for="r_url">스크립트 웹 앱 주소</label><input id="r_url" value="${esc(cfg.url || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off">
       <label for="r_key">앱 키 (APP_KEY)</label><input id="r_key" type="password" value="${esc(cfg.key || '')}" autocomplete="off">
       <div class="row wrap" style="margin-top:10px"><button class="btn primary" id="r_save" type="button">저장하고 연결 확인</button><button class="btn" id="r_test" type="button">테스트 알림 보내기</button><button class="btn" id="r_sync" type="button">구간 지금 저장</button></div>
       <div id="r_res" style="margin-top:8px"></div>
       <div class="muted" style="font-size:12px">마지막 구간 저장: ${last ? new Date(last).toLocaleString('ko-KR') : '없음'}</div></div>
+    <div class="card"><h2>카테고리별 연결 상태</h2>
+      ${stRow(true, '🪙 코인 — 업비트 공개 시세(키 없음)')}
+      ${stRow(true, '⚡ 코인선물 — 바이낸스 공개 시세(키 없음)')}
+      ${stRow(st.checkedAt ? !!st.av : null, '🇺🇸 해외주식 — Alpha Vantage (속성 ALPHAVANTAGE_API_KEY)')}
+      ${stRow(st.checkedAt ? !!st.kis : null, '🇰🇷 국내주식·🌐 해외선물 — 한국투자증권 (속성 KIS_APP_KEY·KIS_APP_SECRET)')}
+      <div class="muted" style="font-size:12px;margin-top:6px">❔는 아직 연결 확인 전입니다. 키는 Apps Script → 프로젝트 설정 → 스크립트 속성에 직접 넣으세요.</div></div>
     <div class="card"><h2>알아 두기</h2><ul class="steps">
-      <li>이 앱은 업비트 <b>공개 시세</b>만 읽습니다. 주문·계좌 기능은 없습니다.</li>
+      <li>이 앱은 <b>시세 조회</b>만 합니다. 주문·계좌 기능은 없습니다.</li>
       <li>구간과 알림은 공부용입니다. 매수 추천이 아니며 결정과 책임은 본인에게 있습니다.</li>
-      <li>관심 코인과 설정은 이 폰에만 저장됩니다.</li></ul></div>
+      <li>Alpha Vantage 무료 키는 하루 25번 정도만 부를 수 있어, 해외주식은 6시간마다 새로 받고 알림은 3시간마다 확인합니다.</li>
+      <li>관심 종목과 설정은 이 폰에만 저장됩니다.</li></ul></div>
     <div class="card"><h2>앱 정보</h2><div class="muted">가격 위치 v${APP_VERSION}<br>폰 홈 화면에 추가: 크롬 ⋮ → '홈 화면에 추가' 또는 '앱 설치'</div></div>`;
   const res = (html) => { $('#r_res').innerHTML = html; };
   $('#r_save').onclick = async () => {
@@ -316,7 +341,9 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'}${d.telegram || d.discord ? '' : ' <span style="color:var(--red)">(받을 곳이 없음)</span>'} · 자동 확인 ${d.trigger ? '켜짐(10분마다)' : '<span style="color:var(--red)">꺼짐 — 스크립트에서 알림켜기 실행</span>'} · 저장된 코인 ${d.watching}개</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, telegram: !!d.telegram, discord: !!d.discord, version: d.version });
+      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 4 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };
   $('#r_test').onclick = async () => { try { const d = await relay('test'); const s = d.sent || {}; toast(`테스트 알림 보냄: ${(s.done || []).join('·') || '확인 필요'}${(s.fail || []).length ? ' / 실패: ' + s.fail.join('·') : ''}`); } catch (e) { alert(e.message); } };
