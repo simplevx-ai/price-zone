@@ -262,6 +262,25 @@ function 한투연결확인() {
   Logger.log('국내주식 일봉 ' + cs.length + '개 받음. 마지막: ' + (cs.length ? new Date(cs[cs.length - 1].t).toISOString().slice(0, 10) + ' 종가 ' + cs[cs.length - 1].c : '없음'));
 }
 
+/** 키 없이 실행: 이 스크립트(구글 서버)에서 각 시세 서버에 닿는지 확인(키·토큰 값은 쓰지 않음) */
+function 연결점검() {
+  const line = (name, fn) => { try { Logger.log('✅ ' + name + ': ' + fn()); } catch (e) { Logger.log('❌ ' + name + ': ' + (e && e.message || e)); } };
+  line('업비트(코인)', () => { const r = upbitRelay_('/ticker?markets=KRW-BTC'); if (!r.ok) throw new Error(r.error); return '비트코인 ' + fmt_(r.data[0].trade_price) + '원'; });
+  line('바이낸스 선물(코인선물)', () => { const r = UrlFetchApp.fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT', { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) throw new Error('응답 ' + r.getResponseCode() + ' (이 서버 위치에서 막힘 → OKX로 대신 확인)'); return 'BTCUSDT ' + JSON.parse(r.getContentText()).price; });
+  line('OKX 선물(코인선물 예비)', () => { const r = UrlFetchApp.fetch('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP', { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) throw new Error('응답 ' + r.getResponseCode()); return 'BTC-USDT-SWAP ' + JSON.parse(r.getContentText()).data[0].last; });
+  line('코인선물 알림용 가격(바이낸스→OKX)', () => { const p = cfutPrice_('BTCUSDT'); if (!p) throw new Error('둘 다 실패'); return String(p); });
+  line('Alpha Vantage(해외주식, 공개 demo 키로 IBM)', () => { const r = UrlFetchApp.fetch('https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey=demo', { muteHttpExceptions: true }); const j = JSON.parse(r.getContentText()); if (!j['Global Quote']) throw new Error(j.Note || j.Information || '응답 이상'); return 'IBM $' + j['Global Quote']['05. price']; });
+  line('한국투자증권 서버 접속(포트 9443, 키 없이)', () => { const r = UrlFetchApp.fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', { method: 'post', contentType: 'application/json', payload: '{}', muteHttpExceptions: true }); return '응답 ' + r.getResponseCode() + ' — 서버에 닿음(키를 넣으면 토큰 발급 가능)'; });
+}
+/** 텔레그램·디스코드 값을 넣은 뒤 실행: 테스트 알림 한 통 보내기 */
+function 테스트알림() { Logger.log(JSON.stringify(send_('✅ 가격 위치 알림 테스트입니다(편집기에서 실행). 이 메시지가 보이면 연결이 잘 된 것입니다.'))); }
+/** ALPHAVANTAGE_API_KEY를 넣은 뒤 실행: 내 키로 AAPL 일봉을 받아 봄(키 값은 찍지 않음) */
+function 해외주식연결확인() {
+  const j = avFetch_({ function: 'TIME_SERIES_DAILY', symbol: 'AAPL' }, 0);
+  const k = Object.keys(j).find((x) => /Time Series/.test(x));
+  Logger.log(k ? 'AAPL 일봉 ' + Object.keys(j[k]).length + '개 받음(무료 키는 최근 100개)' : '실패: ' + (j.Note || j.Information || j['Error Message'] || '응답 이상'));
+}
+
 /* 업비트 공개 시세 중계: 업비트는 브라우저 직접 요청을 10초에 1번만 허용하므로 앱 대신 받아 준다.
    정해진 시세 주소 모양만 허용(주문·계좌 주소는 거절). 같은 주소는 30초 동안 캐시. */
 function upbitRelay_(path) {
