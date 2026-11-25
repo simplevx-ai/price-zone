@@ -53,6 +53,8 @@
         <tr><td>KIS_APP_KEY</td><td>한국투자증권 앱키 — 🇰🇷 국내주식·🌐 해외선물을 볼 때</td></tr>
         <tr><td>KIS_APP_SECRET</td><td>한국투자증권 앱시크릿</td></tr>
         <tr><td>KIS_ENV</td><td>real(실전, 비워 두면 이것) 또는 demo(모의투자 키일 때)</td></tr>
+        <tr><td>ANTHROPIC_API_KEY</td><td>Claude API 키 — 🤖 AI 분석 (종목 1개에 약 13번 호출, 약 1달러 안팎 추정)</td></tr>
+        <tr><td>AI_DAILY_CALLS</td><td>(선택) 하루 AI 호출 한도. 비우면 130번(약 10종목)</td></tr>
         <tr><td>APP_KEY</td><td>아무 긴 문자열(20자 이상 권장). 앱 설정에도 같은 값</td></tr>
       </table></div>
 
@@ -77,6 +79,15 @@
         <li><a href="https://apiportal.koreainvestment.com/" target="_blank" rel="noopener">KIS Developers</a>에서 Open API 서비스 신청 → <b>앱키·앱시크릿</b> 발급.</li>
         <li>스크립트 속성에 KIS_APP_KEY·KIS_APP_SECRET을 넣고, 편집기에서 <b>한투연결확인</b>을 실행해 로그에 ‘국내주식 일봉 ○○개 받음’이 나오는지 봅니다.</li>
         <li>이 앱은 <b>시세 조회만</b> 합니다. 주문 기능은 넣지 않았습니다.</li>
+      </ol></div>
+
+    <div class="card"><h2>Claude API 키 받기 (🤖 AI 분석)</h2>
+      <ol class="big">
+        <li><a href="https://console.anthropic.com/" target="_blank" rel="noopener">Claude 콘솔(console.anthropic.com)</a>에 가입·로그인 → <b>Billing</b>에서 결제 수단 등록(쓴 만큼 나감).</li>
+        <li>왼쪽 <b>API Keys</b> → <b>Create Key</b> → 이름 <span class="k">가격 위치</span> → 키 복사(sk-ant-…). 한 번만 보이니 바로 넣으세요.</li>
+        <li>콘솔의 <b>Limits</b>에서 월 사용 한도를 정해 두면 요금이 과하게 나오지 않습니다.</li>
+        <li>스크립트 속성 <span class="k">ANTHROPIC_API_KEY</span>에 붙여 넣고 저장 → 편집기에서 <b>AI연결확인</b> 실행 → 로그에 ‘✅ Claude 연결됨’이 나오면 됩니다.</li>
+        <li>키는 채팅·메모에 붙여 넣지 마세요. 스크립트 속성에만 둡니다. 앱(폰)에는 저장되지 않습니다.</li>
       </ol></div>
 
     <div class="card"><h2>5. 앱에 연결</h2>

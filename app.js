@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -103,6 +103,9 @@ const routes = [
   [/^#\/a\/(\w+)\/([^/]+)$/, 'list', (m) => viewAsset(m[1], decodeURIComponent(m[2]))],
   [/^#\/c\/(KRW-[\w]+)$/, 'list', (m) => viewAsset('coin', m[1])], // 예전 주소
   [/^#\/add$/, 'list', viewAdd],
+  [/^#\/ai$/, 'ai', viewAiHome],
+  [/^#\/ai\/(\w+)\/([^/]+)$/, 'ai', (m) => viewAiAsset(m[1], decodeURIComponent(m[2]))],
+  [/^#\/air\/([^/]+)$/, 'ai', (m) => viewAiReport(decodeURIComponent(m[1]))],
   [/^#\/learn$/, 'learn', viewLearn],
   [/^#\/settings$/, 'settings', viewSettings],
 ];
@@ -226,6 +229,7 @@ async function viewAsset(cat, sym) {
       <div class="muted" style="font-size:11px;margin-top:4px">빨강 상승·파랑 하락 봉 · 선: <span style="color:#E8A317">60</span>/<span style="color:#8E5CF0">120</span>/<span style="color:#1F9D63">200</span>봉 평균 · 칠한 띠: 검토 구간(진할수록 근거 많음)</div></div>
     <div id="sum" class="card"><div class="muted">계산 중…</div></div>
     <div id="zs"></div>
+    ${AI_SUPPORTED.includes(cat) ? `<a class="card coin" href="#/ai/${cat}/${enc(sym)}" style="display:block"><div class="row spread"><b>🤖 AI 전문가 팀 분석</b><span>›</span></div><div class="muted" style="font-size:13px;margin-top:4px">분석가 4명·토론·위험 관리 → 5단계 등급 + 공부 정리 (AI 의견·공부용)</div></a>` : ''}
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
@@ -338,6 +342,7 @@ async function viewSettings() {
       ${stRow(st.checkedAt ? !!st.av : null, '🇺🇸 해외주식 — Alpha Vantage (속성 ALPHAVANTAGE_API_KEY)')}
       ${stRow(st.checkedAt ? !!(st.krx || st.kis) : null, '🇰🇷 국내주식 — 공공데이터포털 (속성 DATA_GO_KR_KEY, 하루 1번 갱신) 또는 한국투자증권')}
       ${stRow(st.checkedAt ? !!st.kis : null, '🌐 해외선물 — 한국투자증권 (속성 KIS_APP_KEY·KIS_APP_SECRET)')}
+      ${stRow(st.checkedAt ? !!st.ai : null, '🤖 AI 분석 — Claude API (속성 ANTHROPIC_API_KEY)' + (st.aiToday && st.aiToday.day ? ` · 오늘 ${st.aiToday.calls}/${st.aiCap || 130}번` : ''))}
       <div class="muted" style="font-size:12px;margin-top:6px">❔는 아직 연결 확인 전입니다. 키는 Apps Script → 프로젝트 설정 → 스크립트 속성에 직접 넣으세요.</div></div>
     <div class="card"><h2>알아 두기</h2><ul class="steps">
       <li>이 앱은 <b>시세 조회</b>만 합니다. 주문·계좌 기능은 없습니다.</li>
@@ -354,8 +359,8 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null });
-      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 6 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null });
+      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 7 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };

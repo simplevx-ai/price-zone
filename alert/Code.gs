@@ -5,6 +5,7 @@
  * 2) 키가 필요한 시세(해외주식 Alpha Vantage, 국내주식·해외선물 한국투자증권)를 앱 대신 받아 준다(키는 여기만 보관).
  * 3) 업비트는 브라우저 직접 요청이 10초 1회로 막혀 있어 앱 대신 받아 준다.
  * 4) 매일 14시(한국 시간) 이후 한 번, 앱을 열지 않아도 알림 종목의 검토 구간을 스스로 다시 계산한다(앱과 같은 계산식).
+ * 5) 🤖 AI 분석: 앱이 단계별로 보내는 글을 Claude(claude-opus-5-5)에 대신 보내고 답을 돌려준다(키는 여기만, 하루 호출 한도).
  * 모두 '시세 조회'만 한다. 주문·계좌 기능은 없다.
  *
  * ── 스크립트 속성(프로젝트 설정 → 스크립트 속성)에 직접 넣을 값 ──
@@ -17,11 +18,13 @@
  *   KIS_APP_SECRET       한국투자증권 앱시크릿      ┘
  *   KIS_ENV              real(실전, 기본) 또는 demo(모의투자)
  *   DATA_GO_KR_KEY       공공데이터포털 '금융위원회_주식시세정보' 서비스키 — 국내주식(한투 없이, 하루 1번 갱신)
+ *   ANTHROPIC_API_KEY    Claude API 키 — 🤖 AI 분석(종목 1개에 약 13번 호출, 모델 claude-opus-5-5)
+ *   AI_DAILY_CALLS       (선택) 하루 AI 호출 한도, 비우면 130번(약 10종목)
  *
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 6;
+const VERSION = 7;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -37,12 +40,14 @@ function doPost(e) {
     if (!appKey || d.key !== appKey) return json_({ ok: false, error: 'denied' });
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
-        av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null });
+        av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null,
+        ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_() });
     }
     if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'av') return json_(avRelay_(d));
     if (d.action === 'kis') return json_(kisRelay_(d));
     if (d.action === 'krx') return json_(krxRelay_(d));
+    if (d.action === 'claude') return json_(claudeRelay_(d));
     if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
     if (d.action === 'saveWatch') {
       const items = (d.items || []).slice(0, 40).map((x) => ({
@@ -425,7 +430,7 @@ function cfutPrice_(sym) {
 }
 
 /* ───────── Alpha Vantage(해외주식): 키는 여기만, 결과는 캐시(무료 하루 25회) ───────── */
-const AV_FN_ = { TIME_SERIES_DAILY: 6 * 3600, TIME_SERIES_WEEKLY: 24 * 3600, SYMBOL_SEARCH: 7 * 86400, GLOBAL_QUOTE: 1800 };
+const AV_FN_ = { TIME_SERIES_DAILY: 6 * 3600, TIME_SERIES_WEEKLY: 24 * 3600, SYMBOL_SEARCH: 7 * 86400, GLOBAL_QUOTE: 1800, OVERVIEW: 24 * 3600, NEWS_SENTIMENT: 6 * 3600 };
 function avRelay_(d) {
   const fn = String(d.fn || '');
   if (!AV_FN_[fn]) return { ok: false, error: '허용하지 않는 Alpha Vantage 기능입니다' };
@@ -434,7 +439,65 @@ function avRelay_(d) {
   if (fn === 'SYMBOL_SEARCH') q.keywords = String(d.keywords || '').slice(0, 40);
   else q.symbol = String(d.symbol || '').toUpperCase().replace(/[^A-Z0-9.\-]/g, '').slice(0, 16);
   if (!(q.symbol || q.keywords)) return { ok: false, error: '종목을 넣어 주세요' };
+  if (fn === 'NEWS_SENTIMENT') return { ok: true, data: avNews_(q.symbol) };
   return { ok: true, data: avFetch_(q, AV_FN_[fn]) };
+}
+// 뉴스·감성 점수: 원본이 커서(캐시 한도 100KB) 필요한 칸만 줄여 6시간 캐시 — AI 분석의 뉴스·여론 담당이 씀
+function avNews_(sym) {
+  const cache = CacheService.getScriptCache(), ck = 'avn_' + sym, hit = cache.get(ck);
+  if (hit) return JSON.parse(hit);
+  const j = avFetch_({ function: 'NEWS_SENTIMENT', tickers: sym, limit: 40, sort: 'LATEST' }, 0);
+  if (!j.feed) return j; // Note·Information(한도)·오류는 그대로 돌려줌
+  const out = { items: j.items, feed: j.feed.slice(0, 40).map((x) => {
+    const ts = (x.ticker_sentiment || []).find((t) => t.ticker === sym) || {};
+    return { t: x.time_published, title: String(x.title || '').slice(0, 200), src: x.source, sum: String(x.summary || '').slice(0, 300),
+      s: Number(x.overall_sentiment_score), sl: x.overall_sentiment_label, rel: Number(ts.relevance_score), ts: Number(ts.ticker_sentiment_score), tl: ts.ticker_sentiment_label };
+  }) };
+  const t = JSON.stringify(out); if (t.length < 95000) cache.put(ck, t, 6 * 3600);
+  return out;
+}
+
+/* ───────── Claude(AI 분석): 키는 여기만, 모델 고정, 하루 호출 한도 ───────── */
+const AI_MODEL_ = 'claude-opus-5-5';
+const AI_DEFAULT_DAILY_CALLS_ = 130; // 종목 1개 = 약 13번 → 하루 10종목. 속성 AI_DAILY_CALLS로 바꿀 수 있음
+function aiUsage_() {
+  const u = JSON.parse(PropertiesService.getScriptProperties().getProperty('AI_USAGE') || '{}');
+  const day = kstDay_(Date.now());
+  return u.day === day ? u : { day: day, calls: 0, inTok: 0, outTok: 0 };
+}
+function aiCap_() { return Number(PropertiesService.getScriptProperties().getProperty('AI_DAILY_CALLS')) || AI_DEFAULT_DAILY_CALLS_; }
+function claudeRelay_(d) {
+  const P = PropertiesService.getScriptProperties();
+  const key = (P.getProperty('ANTHROPIC_API_KEY') || '').trim();
+  if (!key) return { ok: false, error: '스크립트 속성에 ANTHROPIC_API_KEY가 없습니다' };
+  const lock = LockService.getScriptLock(); lock.waitLock(20000);
+  let u;
+  try {
+    u = aiUsage_();
+    if (u.calls >= aiCap_()) return { ok: false, error: '오늘 AI 호출 한도(' + aiCap_() + '번)를 다 썼습니다. 내일 다시 하거나 속성 AI_DAILY_CALLS를 늘리세요' };
+    u.calls++; P.setProperty('AI_USAGE', JSON.stringify(u)); // 먼저 세어 두기(동시에 여러 개가 와도 한도를 넘지 않게)
+  } finally { lock.releaseLock(); }
+  const effort = ['low', 'medium', 'high'].indexOf(d.effort) >= 0 ? d.effort : 'medium';
+  const body = { model: AI_MODEL_, max_tokens: Math.max(500, Math.min(Number(d.maxTokens) || 8000, 16000)),
+    system: String(d.system || '').slice(0, 30000), messages: [{ role: 'user', content: String(d.user || '').slice(0, 150000) }],
+    output_config: { effort: effort }, fallbacks: 'default' };
+  if (d.schema && typeof d.schema === 'object') body.output_config.format = { type: 'json_schema', schema: d.schema };
+  const r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', { method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'server-side-fallback-2026-07-01' }, payload: JSON.stringify(body) });
+  const code = r.getResponseCode();
+  let j; try { j = JSON.parse(r.getContentText()); } catch (e) { return { ok: false, error: 'Claude 응답을 읽지 못함(' + code + ')' }; }
+  if (code !== 200) return { ok: false, error: 'Claude 오류 ' + code + ': ' + String((j.error && j.error.message) || '').replace(/sk-ant-\S+/g, '<키>').slice(0, 200) };
+  if (j.stop_reason === 'refusal') return { ok: false, error: 'Claude가 이 요청을 거절했습니다(' + ((j.stop_details && j.stop_details.category) || '사유 없음') + ')' };
+  const text = (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+  const inTok = (j.usage && (j.usage.input_tokens + (j.usage.cache_read_input_tokens || 0) + (j.usage.cache_creation_input_tokens || 0))) || 0, outTok = (j.usage && j.usage.output_tokens) || 0;
+  lock.waitLock(20000);
+  try { const v = aiUsage_(); v.inTok += inTok; v.outTok += outTok; P.setProperty('AI_USAGE', JSON.stringify(v)); } finally { lock.releaseLock(); }
+  return { ok: true, text: text, stop: j.stop_reason, model: j.model, usage: { in: inTok, out: outTok } };
+}
+/** ANTHROPIC_API_KEY를 넣은 뒤 실행: 아주 짧은 질문 하나로 키가 되는지 확인(키 값은 찍지 않음, 비용 1원 안팎) */
+function AI연결확인() {
+  const r = claudeRelay_({ system: '한국어로 한 문장만 답하세요.', user: '연결 확인입니다. "연결됨"이라고만 답하세요.', effort: 'low', maxTokens: 500 });
+  Logger.log(r.ok ? '✅ Claude 연결됨 (' + r.model + '): ' + r.text + ' / 토큰 입력 ' + r.usage.in + '·출력 ' + r.usage.out : '❌ ' + r.error);
 }
 function avFetch_(q, ttl) {
   const cache = CacheService.getScriptCache();
@@ -618,6 +681,8 @@ function 설정확인() {
   Logger.log('Alpha Vantage 키: ' + (P.getProperty('ALPHAVANTAGE_API_KEY') ? '있음' : '없음') + ' / 공공데이터 키: ' + (P.getProperty('DATA_GO_KR_KEY') ? '있음' : '없음') + ' / 한국투자증권 키: ' + (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET') ? '있음' : '없음') + ' (' + (P.getProperty('KIS_ENV') || 'real') + ')');
   const rc = watchMeta_().recalc;
   Logger.log('구간 자동 재계산(매일 ' + RECALC_HOUR + '시 이후): ' + (rc ? '마지막 ' + Utilities.formatDate(new Date(rc.at), 'Asia/Seoul', 'M/d HH:mm') + ' · 성공 ' + rc.done + ' · 실패 ' + rc.fail.length + (rc.fail.length ? ' (' + rc.fail.join(' / ') + ')' : '') : '아직 실행 전'));
+  const au = aiUsage_();
+  Logger.log('🤖 AI 분석(Claude ' + AI_MODEL_ + '): 키 ' + (P.getProperty('ANTHROPIC_API_KEY') ? '있음' : '없음') + ' / 오늘 ' + au.calls + '번 사용(한도 ' + aiCap_() + ') · 토큰 입력 ' + au.inTok + '·출력 ' + au.outTok + ' · 추정 $' + (au.inTok * 4 / 1e6 + au.outTok * 20 / 1e6).toFixed(2));
 }
 /** 한국투자증권 키를 넣은 뒤 한 번 실행: 토큰 발급·삼성전자 일봉 받기가 되는지 확인(값은 찍지 않음) */
 function 한투연결확인() {
