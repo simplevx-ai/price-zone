@@ -126,5 +126,82 @@ const BT = (() => {
     });
     return out;
   }
-  return { DEF, run, checkData, stats };
+
+  /* ── 3단계: 워크포워드 검증 ──
+   * 데이터를 시간순으로 [학습 2칸 | 시험 1칸]씩 밀어 가며:
+   *  학습 구간에서만 손절(ATR 배수)·목표(R) 조합을 골라(시험 구간은 보지 않음) → 바로 다음 시험 구간에서 처음 보는 데이터로 성과를 잰다.
+   *  지표 준비용 앞쪽 봉(warmup)은 그 구간 '이전' 데이터만 쓴다. 시험 구간끼리는 겹치지 않는다.
+   * 결과: 구간마다 고른 설정·학습 성과·시험 성과, 시험 구간을 이어 붙인 성과, 같은 구간에서 기본 설정의 성과(비교용), 시험한 조합 수(과최적화 위험).
+   */
+  const GRID = { stopAtr: [1.5, 2, 3], rr: [1.5, 2, 3] };
+  function walkForward(rawCs, opt, wf) {
+    wf = Object.assign({ folds: 4, trainMult: 2, minTrades: 3 }, wf || {});
+    const o = Object.assign({}, DEF, opt || {});
+    const { cs } = checkData(rawCs, o.tfMs);
+    const W = STRATS.warmup, usable = cs.length - W, T = Math.floor(usable / (wf.folds + wf.trainMult));
+    if (T < 40) throw new Error('워크포워드에는 봉이 더 필요합니다(구간마다 40봉 이상 — 봉 개수를 늘리거나 짧은 봉을 쓰세요)');
+    const combos = []; GRID.stopAtr.forEach((a) => GRID.rr.forEach((r) => combos.push({ stopAtr: a, rr: r })));
+    const seg = (a, b, extra) => run(cs.slice(a - W, b), Object.assign({}, o, extra || {})); // a..b-1 구간을 거래, 앞 W봉은 지표 준비(과거)
+    const folds = [];
+    for (let f = 0; f < wf.folds; f++) {
+      const tr0 = W + f * T, tr1 = tr0 + wf.trainMult * T, te1 = tr1 + T;
+      // 학습: 조합마다 돌려서 순수익률이 가장 높은 것(거래 수 minTrades 이상), 같으면 MDD가 작은 것
+      let best = null;
+      for (const c of combos) {
+        const r = seg(tr0, tr1, c);
+        if (r.stats.n < wf.minTrades) continue;
+        if (!best || r.stats.netPct > best.r.stats.netPct || (r.stats.netPct === best.r.stats.netPct && r.stats.mdd > best.r.stats.mdd)) best = { c, r };
+      }
+      const pick = best ? best.c : { stopAtr: o.stopAtr, rr: o.rr };
+      const test = seg(tr1, te1, pick), base = seg(tr1, te1, { stopAtr: o.stopAtr, rr: o.rr });
+      folds.push({ trainFrom: cs[tr0].t, trainTo: cs[tr1 - 1].t + o.tfMs, testFrom: cs[tr1].t, testTo: cs[te1 - 1].t + o.tfMs, pick, picked: !!best, train: best ? best.r.stats : null, test: test.stats, base: base.stats });
+    }
+    const chain = (k) => (folds.reduce((a, x) => a * (1 + x[k].netPct / 100), 1) - 1) * 100;
+    const sumN = (k) => folds.reduce((a, x) => a + x[k].n, 0);
+    const avg = (L) => (L.length ? L.reduce((a, x) => a + x, 0) / L.length : null);
+    return {
+      folds, T, combos: combos.length, tried: combos.length * wf.folds,
+      oos: { netPct: chain('test'), n: sumN('test'), worstMdd: Math.min(...folds.map((x) => x.test.mdd)) },
+      baseOos: { netPct: chain('base'), n: sumN('base') },
+      avgTrain: avg(folds.filter((x) => x.train).map((x) => x.train.netPct)), avgTest: avg(folds.map((x) => x.test.netPct)),
+    };
+  }
+
+  /* ── 3단계: 시장 국면별 결과 ──
+   * 국면은 진입 신호가 난 봉까지의 데이터로만 정한다(미래 안 봄).
+   *  추세: 종가 > EMA50 이고 EMA50이 10봉 전보다 높으면 '상승', 종가 < EMA50 이고 낮으면 '하락', 그 밖은 '횡보'
+   *  변동성: 그 봉의 ATR% 가 그때까지 지난 100봉 ATR% 중간값보다 크면 '고변동', 아니면 '저변동'
+   */
+  function regimes(cs) {
+    const I = SCAN.ind(cs), out = [];
+    const atrP = cs.map((k, i) => (I.atr[i] ? I.atr[i] / k.c : null));
+    for (let i = 0; i < cs.length; i++) {
+      const e = I.ema50[i], e10 = I.ema50[i - 10], c = cs[i].c;
+      const trend = e == null || e10 == null ? null : c > e && e > e10 ? 'up' : c < e && e < e10 ? 'down' : 'side';
+      const past = atrP.slice(Math.max(0, i - 100), i).filter((x) => x != null).sort((a, b) => a - b);
+      const vol = atrP[i] == null || past.length < 20 ? null : atrP[i] > past[Math.floor(past.length / 2)] ? 'high' : 'low';
+      out.push({ trend, vol });
+    }
+    return out;
+  }
+  const RG_KO = { up: '상승', down: '하락', side: '횡보', high: '고변동', low: '저변동', na_t: '추세 판단 못 함', na_v: '변동성 판단 못 함' };
+  function byRegime(r, rawCs) {
+    const { cs } = checkData(rawCs, r.opt.tfMs), rg = regimes(cs), idx = new Map(cs.map((k, i) => [k.t, i]));
+    const buckets = {};
+    for (const t of r.trades) {
+      const ei = idx.get(t.entryT), si = ei - 1; // 신호 봉 = 진입 봉 바로 앞
+      const g = si >= 0 ? rg[si] : null;
+      for (const [key, miss] of [[g && g.trend, 'na_t'], [g && g.vol, 'na_v']]) {
+        const k = key || miss;
+        const b = buckets[k] || (buckets[k] = { key: k, name: RG_KO[k] || '판단 못 함', n: 0, win: 0, pnl: 0, R: 0 });
+        b.n++; if (t.pnl > 0) b.win++; b.pnl += t.pnl; b.R += t.R;
+      }
+    }
+    // 데이터 기간 중 각 국면이 차지한 비율(거래가 없어도 보여 주려고)
+    const share = {}; let cnt = 0;
+    rg.slice(STRATS.warmup).forEach((g) => { if (!g.trend) return; cnt++; share[g.trend] = (share[g.trend] || 0) + 1; if (g.vol) share[g.vol] = (share[g.vol] || 0) + 1; });
+    const order = ['up', 'side', 'down', 'na_t', 'high', 'low', 'na_v'];
+    return order.filter((k) => buckets[k] || share[k]).map((k) => Object.assign({ key: k, name: RG_KO[k] || '판단 못 함', n: 0, win: 0, pnl: 0, R: 0 }, buckets[k] || {}, { share: cnt ? ((share[k] || 0) / cnt) * 100 : null }));
+  }
+  return { DEF, run, checkData, stats, walkForward, regimes, byRegime, GRID };
 })();

@@ -80,5 +80,29 @@ function flat(n) { return Array.from({ length: n }, (_, i) => ({ t: T0 + i * H, 
 // 9) 성과 지표 값이 숫자로 나옴
 { const r = BT.run(series(900), { ...base, strat: 'C' }), s = r.stats;
   ok('성과 지표(수익률·MDD·PF·Sharpe·Sortino·연속 손실) 계산', [s.netPct, s.mdd, s.winRate, s.maxLossStreak].every(Number.isFinite) && (s.sharpe === null || Number.isFinite(s.sharpe)) && r.segs.length === 3, { n: s.n, net: s.netPct, mdd: s.mdd, pf: s.pf, sh: s.sharpe, segs: r.segs.map((x) => x.name) }); }
+// ── 3단계 ──
+// 10) 워크포워드: 시험 구간은 학습 구간 뒤, 서로 겹치지 않음
+{ const cs = series(1200), w = BT.walkForward(cs, { ...base, strat: 'C' });
+  const order = w.folds.every((f, i) => f.trainTo <= f.testFrom && (i === 0 || w.folds[i - 1].testTo <= f.testFrom));
+  ok(`워크포워드 구간 순서·겹침 없음(${w.folds.length}구간, 조합 ${w.combos}개 × ${w.folds.length} = ${w.tried}번 시험)`, order && w.folds.length === 4 && w.tried === 36, w.folds.map((f) => [f.trainFrom, f.trainTo, f.testFrom, f.testTo])); }
+// 11) 워크포워드: 학습 때 고른 설정은 시험 구간 데이터를 바꿔도 그대로(학습이 시험 구간을 보지 않음)
+{ const cs = series(1200), w1 = BT.walkForward(cs, { ...base, strat: 'C' });
+  const f0 = w1.folds[0], cs2 = cs.map((k) => (k.t >= f0.testFrom ? { ...k, o: k.o * 1.3, h: k.h * 1.3, l: k.l * 1.3, c: k.c * 1.3 } : k));
+  const w2 = BT.walkForward(cs2, { ...base, strat: 'C' });
+  ok('워크포워드 학습은 시험 구간을 보지 않음', JSON.stringify(w1.folds[0].pick) === JSON.stringify(w2.folds[0].pick) && w1.folds[0].train && w2.folds[0].train && Math.abs(w1.folds[0].train.netPct - w2.folds[0].train.netPct) < 1e-9, { a: w1.folds[0].pick, b: w2.folds[0].pick }); }
+// 12) 워크포워드: 시험 구간 성과를 이어 붙인 값
+{ const w = BT.walkForward(series(1200), { ...base, strat: 'B' });
+  const chain = (w.folds.reduce((a, f) => a * (1 + f.test.netPct / 100), 1) - 1) * 100;
+  ok('워크포워드 시험 구간 이어 붙인 수익률', Math.abs(chain - w.oos.netPct) < 1e-9 && w.oos.n === w.folds.reduce((a, f) => a + f.test.n, 0), { oos: w.oos }); }
+// 13) 봉이 부족하면 거절
+{ let msg = ''; try { BT.walkForward(series(250), { ...base, strat: 'B' }); } catch (e) { msg = e.message; } ok('워크포워드: 봉이 모자라면 거절', /봉이 더 필요/.test(msg), msg); }
+// 14) 시장 국면은 그 봉까지의 데이터로만(앞부분만 넣어도 같음)
+{ const cs = series(600), a = BT.regimes(cs), b = BT.regimes(cs.slice(0, 400));
+  ok('시장 국면은 미래 봉을 보지 않음', JSON.stringify(a.slice(0, 400)) === JSON.stringify(b), null); }
+// 15) 국면별 거래 수 합 = 전체 거래 수(추세 기준)
+{ const cs = series(900), r = BT.run(cs, { ...base, strat: 'C' }), g = BT.byRegime(r, cs);
+  const sum = (keys) => g.filter((x) => keys.includes(x.key)).reduce((a, x) => a + x.n, 0);
+  const nT = sum(['up', 'side', 'down', 'na_t']), nV = sum(['high', 'low', 'na_v']);
+  ok(`국면별 거래 수 합 = 전체(${r.trades.length}) — 추세 ${nT}·변동성 ${nV}`, nT === r.trades.length && nV === r.trades.length, { nT, nV, all: r.trades.length, g: g.map((x) => x.key + ':' + x.n) }); }
 console.log(`\n결과: 통과 ${pass} · 실패 ${fail}`);
 process.exit(fail ? 1 : 0);

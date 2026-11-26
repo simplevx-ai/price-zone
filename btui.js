@@ -56,6 +56,7 @@ async function btCandles(ex, base, tf, want, onProg) {
 
 const btPct = (x, d = 2) => (x == null || !Number.isFinite(x) ? '-' : `${x > 0 ? '+' : ''}${x.toFixed(d)}%`);
 const btNum = (x, d = 2) => (x == null ? '-' : x === Infinity ? '∞' : Number.isFinite(x) ? x.toFixed(d) : '-');
+let BT_LAST = null; // { cs, hiCs, p, ctx } — 워크포워드는 방금 받은 같은 데이터로
 const btT = (t) => new Date(t).toLocaleString('ko-KR', { year: '2-digit', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 async function viewBacktest() {
@@ -94,7 +95,7 @@ async function viewBacktest() {
       <li>수수료는 진입·청산 명목가에 각각, 펀딩비는 UTC 0·8·16시(한국 9·17·1시)를 지날 때마다 명목가 × 가정 비율. <b>실제 과거 펀딩비가 아닌 가정값</b>입니다.</li>
       <li>아직 하지 않은 것: 계약 수량·호가 단위 반올림, 숏(매도) 진입, 지정가·부분 체결, 실제 과거 펀딩비. 결과는 이 가정에 따라 달라집니다.</li>
       <li>기간은 시간순으로 개발 60% · 검증 20% · 테스트 20%로 나눠 각각 보여 줍니다. 테스트 구간 결과로 설정을 맞추면 과최적화가 됩니다.</li></ul></details></div>
-    ${runs.length ? `<div class="card"><h2>지난 실행 <span class="muted">(${runs.length})</span></h2>${runs.slice(0, 10).map((r) => `<div class="logrow">${esc(r.when)} · ${esc(r.label)} · <b class="${r.net > 0 ? 'up' : 'down'}">${btPct(r.net)}</b> · MDD ${btPct(r.mdd)} · ${r.n}번 <span class="muted">(전략 v${esc(r.ver)})</span></div>`).join('')}</div>` : ''}
+    ${runs.length ? `<div class="card"><h2>지난 실행 <span class="muted">(${runs.length})</span></h2>${runs.slice(0, 10).map((r, i) => `<div class="logrow row spread" style="gap:6px"><span>${esc(r.when)} · ${esc(r.label)} · <b class="${r.net > 0 ? 'up' : 'down'}">${btPct(r.net)}</b> · MDD ${btPct(r.mdd)} · ${r.n}번 <span class="muted">(전략 v${esc(r.ver)}${r.ver !== STRATS.VERSION ? ' — 지금 버전과 다름' : ''})</span></span>${r.opt ? `<button class="btn small" type="button" data-rerun="${i}">다시 실행</button>` : ''}</div>`).join('')}<div class="muted" style="font-size:11px;margin-top:4px">다시 실행은 같은 설정으로 지금 데이터를 새로 받아 돌립니다(기간이 바뀌어 결과가 다를 수 있음).</div></div>` : ''}
     <div class="disc">공부용 · 실제 주문 없음 · <a href="#/learn">📘 검토 구간 근거 설명</a> · v${APP_VERSION}</div>`;
   const showDesc = () => { $('#bsd').textContent = STRATS.LIST[$('#bs').value].desc; };
   $('#bs').onchange = showDesc; showDesc();
@@ -119,11 +120,13 @@ async function viewBacktest() {
       const res = [];
       for (const k of keys) {
         if (STRATS.LIST[k].needsHigher && !hiCs) { res.push({ strat: k, name: STRATS.LIST[k].name, error: '일봉은 상위 봉이 없어 전략 F를 쓸 수 없습니다' }); continue; }
-        try { res.push(BT.run(cs, { ...p, strat: k, tfMs: BT_TF[p.tf].ms, hiCs, hiMs: hiTf ? BT_TF[hiTf].ms : null })); } catch (e) { res.push({ strat: k, name: STRATS.LIST[k].name, error: e.message }); }
+        try { const r = BT.run(cs, { ...p, strat: k, tfMs: BT_TF[p.tf].ms, hiCs, hiMs: hiTf ? BT_TF[hiTf].ms : null }); r.regimes = BT.byRegime(r, cs); res.push(r); } catch (e) { res.push({ strat: k, name: STRATS.LIST[k].name, error: e.message }); }
       }
       msg('');
       $('#bout').innerHTML = all ? btCompare(res, ctx, p) : btReport(res[0], ctx, p);
       const cv = $('#bcv'); if (cv && res[0] && !res[0].error) btDraw(cv, res[0]);
+      BT_LAST = { cs, hiCs, p, ctx, hiTf };
+      const wb = $('#bwf'); if (wb) wb.onclick = () => btRunWf(p.strat);
       // 재현용 기록(설정·전략 버전·데이터 범위)
       const ok = res.filter((r) => !r.error), rr = await KV.get('bt:runs', []);
       ok.forEach((r) => rr.unshift({ when: btT(Date.now()), label: `${p.base} ${BT_TF[p.tf].label} ${BT_EX[p.ex]} · ${r.name}`, net: r.stats.netPct, mdd: r.stats.mdd, n: r.stats.n, ver: r.version, opt: { ...p, strat: r.strat }, from: r.from, to: r.to }));
@@ -132,6 +135,7 @@ async function viewBacktest() {
     finally { $('#brun').disabled = $('#ball').disabled = false; }
   };
   $('#brun').onclick = () => go(false);
+  view().querySelectorAll('[data-rerun]').forEach((b) => { b.onclick = () => { const o = runs[+b.dataset.rerun].opt; const set = (id, v) => { const el = $('#' + id); if (el && v != null) { if (el.tagName === 'SELECT' && ![...el.options].some((x) => x.value === String(v))) el.add(new Option(String(v), String(v))); el.value = String(v); } }; set('bx', o.ex); set('bb', o.base); set('btf', o.tf); set('bn', o.bars); set('bs', o.strat); set('bcap', o.capital); set('brisk', o.riskPct); set('blev', o.lev); set('bfee', o.fee); set('bslip', o.slip); set('bfund', o.fund8h); set('bstop', o.stopAtr); set('brr', o.rr); showDesc(); window.scrollTo(0, 0); go(false); }; });
   $('#ball').onclick = () => go(true);
 }
 
@@ -166,6 +170,9 @@ function btReport(r, ctx, p) {
       ${r.open ? `<div class="warnlist" style="font-size:12px">아직 열린 가상 포지션: ${btT(r.open.entryT)} 진입 ${btNum(r.open.entry, 4)} · 손절 ${btNum(r.open.stop, 4)} · 목표 ${btNum(r.open.target, 4)} · 미실현 ${btNum(r.open.unreal)}</div>` : ''}
       <h4>구간별(시간순, 튜닝에 쓰지 말 것)</h4>
       <div class="tblwrap"><table class="md"><thead><tr><th>구간</th><th>기간</th><th>수익률</th><th>MDD</th><th>거래</th><th>승률</th></tr></thead><tbody>${r.segs.map((g) => `<tr><td>${g.name} ${g.w}%</td><td>${btT(g.from)}~${btT(g.to)}</td><td class="${g.ret > 0 ? 'up' : 'down'}">${btPct(g.ret)}</td><td>${btPct(g.mdd)}</td><td>${g.n}</td><td>${g.win != null ? g.win.toFixed(0) + '%' : '-'}</td></tr>`).join('')}</tbody></table></div>
+      <h4>📊 시장 국면별 <span class="muted">(진입 신호가 난 봉 기준)</span></h4>${btRegime(r.regimes)}
+      <h4>🔁 워크포워드 검증</h4><div class="muted" style="font-size:12px">앞 구간(학습)에서만 손절·목표 조합 9개 중 하나를 고르고, 바로 다음 구간(시험)의 처음 보는 데이터로 성과를 잽니다. 4번 밀어 가며 반복합니다.</div>
+      <button class="btn small" id="bwf" type="button" style="margin-top:6px">🔁 워크포워드 검증 실행</button><div id="bwfOut"></div>
       <details style="margin-top:8px"><summary><b>거래 내역</b> <span class="muted">(${r.trades.length})</span></summary><div class="tblwrap"><table class="md"><thead><tr><th>진입</th><th>진입가</th><th>청산</th><th>청산가</th><th>사유</th><th>손익</th><th>R</th><th>봉</th><th>비용</th></tr></thead><tbody>
         ${r.trades.slice().reverse().map((t) => `<tr><td>${btT(t.entryT)}</td><td>${btNum(t.entry, 4)}</td><td>${btT(t.exitT)}</td><td>${btNum(t.exit, 4)}</td><td>${esc(t.why)}</td><td class="${t.pnl > 0 ? 'up' : 'down'}">${btNum(t.pnl)}</td><td>${btNum(t.R)}</td><td>${t.bars}</td><td>${btNum(t.fee + t.fund)}</td></tr>`).join('')}</tbody></table></div></details>
       ${btAssume(r, ctx, p)}</div>`;
@@ -193,4 +200,27 @@ function btDraw(cv, r) {
   g.strokeStyle = '#7A4CD1'; g.lineWidth = 1.6; g.beginPath(); eq.forEach((v, i) => (i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)))); g.stroke();
   g.fillStyle = 'rgba(214,69,69,.35)'; g.beginPath(); g.moveTo(0, topH + 4); dd.forEach((d, i) => g.lineTo(x(i), topH + 4 + (d / mdd) * (Hh - topH - 8))); g.lineTo(x(dd.length - 1), topH + 4); g.closePath(); g.fill();
   g.fillStyle = ink; g.fillText(`MDD ${(mdd * 100).toFixed(1)}%`, W - 50, Hh - 4);
+}
+
+function btRegime(g) {
+  if (!g || !g.length) return '<div class="muted" style="font-size:12px">거래가 없어 나눌 것이 없습니다.</div>';
+  const row = (x) => `<tr><td>${esc(x.name)}</td><td>${x.share != null ? x.share.toFixed(0) + '%' : '-'}</td><td>${x.n}</td><td>${x.n ? ((x.win / x.n) * 100).toFixed(0) + '%' : '-'}</td><td>${x.n ? (x.R / x.n).toFixed(2) : '-'}</td><td class="${x.pnl > 0 ? 'up' : x.pnl < 0 ? 'down' : ''}">${x.n ? x.pnl.toFixed(2) : '-'}</td></tr>`;
+  const trend = g.filter((x) => ['up', 'side', 'down', 'na_t'].includes(x.key)), vol = g.filter((x) => ['high', 'low', 'na_v'].includes(x.key));
+  return `<div class="tblwrap"><table class="md"><thead><tr><th>국면</th><th>기간 비율</th><th>거래</th><th>승률</th><th>평균 R</th><th>손익</th></tr></thead><tbody>${trend.map(row).join('')}${vol.length ? `<tr><td colspan="6" class="muted" style="font-size:11px">변동성</td></tr>${vol.map(row).join('')}` : ''}</tbody></table></div>
+    <div class="muted" style="font-size:11px">추세: 종가와 EMA50·EMA50 기울기(10봉) / 변동성: ATR%가 지난 100봉 중간값보다 크면 고변동. 거래 수가 적은 칸은 우연일 수 있습니다.</div>`;
+}
+function btRunWf(strat) {
+  const out = $('#bwfOut'), L = BT_LAST; if (!out || !L) return;
+  out.innerHTML = '<div class="muted" style="font-size:12px">계산 중…</div>';
+  setTimeout(() => { // 화면이 먼저 그려지게
+    try {
+      const w = BT.walkForward(L.cs, { ...L.p, strat, tfMs: BT_TF[L.p.tf].ms, hiCs: L.hiCs, hiMs: L.hiTf ? BT_TF[L.hiTf].ms : null });
+      const f = (x) => btPct(x);
+      out.innerHTML = `<div class="tblwrap"><table class="md" style="margin-top:6px"><thead><tr><th>#</th><th>학습 구간</th><th>고른 설정</th><th>학습 수익</th><th>시험 구간</th><th>시험 수익</th><th>시험 MDD</th><th>기본 설정 시험</th></tr></thead><tbody>
+        ${w.folds.map((x, i) => `<tr><td>${i + 1}</td><td>${btT(x.trainFrom)}~${btT(x.trainTo)}</td><td>${x.picked ? `손절 ATR×${x.pick.stopAtr} · 목표 ${x.pick.rr}R` : '<span class="muted">학습 거래 부족 → 기본값</span>'}</td><td>${x.train ? f(x.train.netPct) + ` (${x.train.n}번)` : '-'}</td><td>${btT(x.testFrom)}~${btT(x.testTo)}</td><td class="${x.test.netPct > 0 ? 'up' : 'down'}">${f(x.test.netPct)} (${x.test.n}번)</td><td>${f(x.test.mdd)}</td><td>${f(x.base.netPct)}</td></tr>`).join('')}</tbody></table></div>
+        <div class="grid2" style="font-size:13px;margin-top:6px"><div>시험 구간 이어 붙인 수익 <b class="${w.oos.netPct > 0 ? 'up' : 'down'}">${f(w.oos.netPct)}</b> (${w.oos.n}번)</div><div>같은 구간 기본 설정 <b>${f(w.baseOos.netPct)}</b> (${w.baseOos.n}번)</div>
+          <div>학습 평균 수익 <b>${f(w.avgTrain)}</b></div><div>시험 평균 수익 <b>${f(w.avgTest)}</b></div></div>
+        <div class="warnlist" style="font-size:12px">조합 ${w.combos}개 × ${w.folds.length}구간 = <b>${w.tried}번</b> 시험했습니다.${w.avgTrain != null && w.avgTest != null && w.avgTrain - w.avgTest > 3 ? ' 학습 성과가 시험 성과보다 크게 좋습니다 — <b>과최적화 신호</b>일 수 있습니다.' : ''} 시험 구간 성과(처음 보는 데이터)가 실제에 가깝습니다. 구간마다 ${w.T}봉.</div>`;
+    } catch (e) { out.innerHTML = `<div class="errbox" style="margin-top:6px">${esc(e.message)}</div>`; }
+  }, 30);
 }
