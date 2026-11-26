@@ -102,5 +102,5 @@ const SCAN = (() => {
   // OKX 봉([ts,o,h,l,c,vol,…,confirm], 최신 먼저) / 바이낸스 봉([openTime,o,h,l,c,v,closeTime,…], 오래된 것부터) → 공통 모양(끝난 봉만)
   const fromOkx = (rows) => (rows || []).filter((k) => k[8] === undefined || k[8] === '1').map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).reverse();
   const fromBinance = (rows, now) => (rows || []).filter((k) => +k[6] < (now || Date.now())).map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
-  return { META, GROUPS, CORE, analyze, volClass, strength, dayTrend, fromOkx, fromBinance };
+  return { META, GROUPS, CORE, analyze, volClass, strength, dayTrend, fromOkx, fromBinance, ind }; // ind: 봉마다 지표(백테스트 전략이 재사용)
 })();

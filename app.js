@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.8.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -120,7 +120,8 @@ const routes = [
   [/^#\/ai$/, 'ai', viewAiHome],
   [/^#\/ai\/(\w+)\/([^/]+)$/, 'ai', (m) => viewAiAsset(m[1], decodeURIComponent(m[2]))],
   [/^#\/air\/([^/]+)$/, 'ai', (m) => viewAiReport(decodeURIComponent(m[1]))],
-  [/^#\/learn$/, 'learn', viewLearn],
+  [/^#\/learn$/, 'bt', viewLearn],
+  [/^#\/bt$/, 'bt', viewBacktest],
   [/^#\/settings$/, 'settings', viewSettings],
 ];
 async function render() {
