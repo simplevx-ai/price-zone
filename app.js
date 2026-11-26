@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.5.2';
+const APP_VERSION = '2.6.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -43,7 +43,10 @@ async function getWatch() {
   const w = await KV.get('watch', null);
   if (!w) return DEFAULT_WATCH.map((x) => ({ ...x }));
   const out = w.map((x) => (x.cat ? x : { cat: 'coin', sym: x.market, name: x.name, tf: x.tf || 'day', alert: x.alert }));
-  return out;
+  // 같은 종목이 두 번 들어가 있으면 하나만(알림 켠 쪽을 남김)
+  const m = new Map();
+  for (const x of out) { const k = idOf(x), p = m.get(k); if (!p || (x.alert && !p.alert)) m.set(k, x); }
+  return [...m.values()];
 }
 const setWatch = (w) => KV.set('watch', w);
 
@@ -63,9 +66,9 @@ async function relay(action, extra) {
 const mem = new Map();
 async function candles(a, tf) {
   const key = `c:${idOf(a)}:${tf}`, hit = mem.get(key) || (await KV.get(key, null));
-  if (hit && Date.now() - hit.at < FRESH[tf]) { mem.set(key, hit); return hit.data; }
+  if (hit && Date.now() - hit.at < FRESH[tf]) { mem.set(key, hit); if (hit.src) hit.data.src = hit.src; return hit.data; }
   const data = await fetchCandles(a, tf);
-  const v = { at: Date.now(), data };
+  const v = { at: Date.now(), data, src: data.src || '' };
   mem.set(key, v); KV.set(key, v).catch(() => {});
   return data;
 }
@@ -73,6 +76,7 @@ async function candles(a, tf) {
 async function needMsg(cat) {
   const n = CATS[cat].needs;
   if (!n) return '';
+  if (cat === 'us') return ''; // 해외주식은 키가 없어도 OKX·바이비트의 같은 종목 선물 봉으로 볼 수 있음(출처는 화면 아래에 표시)
   if (!(await relayOn())) return `설정에서 스크립트를 연결하고 ${NEED_LABEL[n]}를 넣어야 볼 수 있습니다`;
   const st = await KV.get('relayStatus', {});
   const has = n.split('|').some((k) => st[k]);
@@ -83,15 +87,23 @@ async function needMsg(cat) {
 // 알림 켠 종목들의 구간을 다시 계산해 스크립트에 저장
 async function syncAlerts(silent) {
   const on = (await getWatch()).filter((w) => w.alert);
-  const items = [];
+  const prev = await KV.get('syncItems', {}), items = [], kept = [];
   for (const w of on) {
+    const base = { cat: w.cat, sym: w.sym, ex: w.ex || '', name: w.name, tf: TFS[w.tf || 'day'].label, tfk: w.tf || 'day' };
     try {
-      const r = ZoneMath.analyze(await candles(w, w.tf || 'day'));
-      if (r.error) continue;
-      items.push({ cat: w.cat, sym: w.sym, ex: w.ex || '', name: w.name, tf: TFS[w.tf || 'day'].label, tfk: w.tf || 'day', price: r.price, zones: r.zones.map((z) => ({ low: z.low, high: z.high, score: z.score, labels: [...new Set(z.items.map((x) => x.label))] })) });
-    } catch { /* 한 종목 실패해도 나머지는 저장 */ }
+      const cs = await candles(w, w.tf || 'day'), r = ZoneMath.analyze(cs, { tf: w.tf || 'day' });
+      if (r.error) throw new Error(r.error);
+      items.push({ ...base, price: r.price, src: cs.src || '', zones: r.zones.map((z) => ({ low: z.low, high: z.high, score: z.score, labels: [...new Set(z.items.map((x) => x.label))], react: ZoneMath.reactText(z.react) })) });
+    } catch {
+      // 이번에 시세를 못 받아도 알림에서 빠지지 않게: 지난번 구간을 다시 보내고, 그것도 없으면 스크립트가 가진 구간을 유지(keep)
+      const p = prev[idOf(w)];
+      items.push(p ? { ...p, ...base } : { ...base, zones: [], keep: true });
+      kept.push(w.name);
+    }
   }
   const d = await relay('saveWatch', { items });
+  const keep = {}; items.forEach((x) => { if (x.zones && x.zones.length) keep[idOf(x)] = x; }); await KV.set('syncItems', keep);
+  if (kept.length && !silent) toast(`시세를 못 받은 ${kept.length}종목은 지난 구간을 유지합니다: ${kept.join(', ')}`);
   await KV.set('lastSync', nowISO());
   if (!silent) toast(`알림 구간 저장: ${items.length}종목 · 구간 ${d.zones}개`);
   return d;
@@ -138,7 +150,7 @@ async function viewList() {
       ${catChips(sel, true)}
       <div id="ls">${L.map((w) => `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
       <a class="btn block" href="#/add">+ 종목 추가</a>
-      <div class="disc">시세: 업비트·바이낸스(공개) · Alpha Vantage · 한국투자증권 · v${APP_VERSION}</div>`;
+      <div class="disc">시세: 업비트·빗썸·바이낸스·OKX·바이비트(공개) · Alpha Vantage · 공공데이터포털 · 한국투자증권 · v${APP_VERSION}</div>`;
     view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { sel = b.dataset.cat; sessionStorage.setItem('pzCat', sel); draw(); }; });
     // 현재가(코인·코인선물은 바로, 나머지는 캔들 마지막 값)
     const q = {};
@@ -153,7 +165,7 @@ async function viewList() {
       if (nm) { info.textContent = '🔑 ' + nm.replace(/를 넣어야 볼 수 있습니다|가 아직 없습니다/, ' 필요'); return; }
       try {
         const cs = await candles(w, w.tf || 'day');
-        const r = ZoneMath.analyze(cs);
+        const r = ZoneMath.analyze(cs, { tf: w.tf || 'day' });
         if (!q[idOf(w)] && cs.length > 1) showPx(w, cs[cs.length - 1].c, ((cs[cs.length - 1].c - cs[cs.length - 2].c) / cs[cs.length - 2].c) * 100);
         if (r.error) { info.textContent = r.error; return; }
         const inside = r.zones.find((z) => r.price >= z.low && r.price <= z.high);
@@ -235,7 +247,7 @@ async function viewAsset(cat, sym) {
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
-    <div class="disc">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : ''}</div>`;
+    <div class="disc" id="srcLine">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : ''}</div>`;
   const save = async (patch) => { const ws = await getWatch(); const i = ws.findIndex((x) => x.cat === cat && x.sym === sym); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await setWatch(ws); } };
   view().querySelectorAll('[name=tf]').forEach((el) => { el.onchange = async () => { await save({ tf: el.value }); render(); }; });
   if ($('#del')) $('#del').onclick = async () => { if (!confirm(`${w.name}을(를) 관심 종목에서 뺄까요?`)) return; await setWatch((await getWatch()).filter((x) => !(x.cat === cat && x.sym === sym))); location.hash = '#/'; };
@@ -251,9 +263,10 @@ async function viewAsset(cat, sym) {
   if (nm) { $('#sum').innerHTML = `<div class="warnlist" style="margin-top:0">🔑 ${esc(nm)}. <a href="#/settings">설정 ›</a></div>`; return; }
   let cs;
   try { cs = await candles(w, tf); } catch (e) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`; return; }
-  const r = ZoneMath.analyze(cs);
+  const r = ZoneMath.analyze(cs, { tf });
   if (r.error) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(r.error)}</div>`; return; }
   const f = (p) => fmtP(p, cat), u = unitOf(cat);
+  if (cs.src && $('#srcLine')) $('#srcLine').insertAdjacentHTML('beforeend', `<br>봉 출처: ${esc(cs.src)}`);
   drawChart($('#cv'), cs, r, f);
   const inside = r.zones.find((z) => r.price >= z.low && r.price <= z.high);
   $('#sum').innerHTML = `<div class="row spread"><span>현재가</span><b style="font-size:20px">${f(r.price)}${u ? ' ' + u : ''}</b></div>
@@ -265,6 +278,7 @@ async function viewAsset(cat, sym) {
   const zh = r.zones.map((z, i) => `<div class="zone ${z.score >= 3 ? 's3' : ''} ${r.price >= z.low && r.price <= z.high ? 'in' : ''}">
       <div class="row spread"><span class="rng">${f(z.low)} ~ ${f(z.high)}</span><span>${'★'.repeat(Math.min(5, Math.round(z.score)))} <span class="muted" style="font-size:12px">${z.score}</span></span></div>
       <div class="muted" style="font-size:13px">구간 ${i + 1} · 현재가 대비 ${pct(((z.high - r.price) / r.price) * 100)} · 근거 ${z.kinds}가지</div>
+      <div style="font-size:12px;margin-top:2px;color:${z.react && z.react.touches >= 2 && z.react.bounces / z.react.touches >= 0.6 ? 'var(--green)' : z.react && z.react.touches >= 2 && z.react.breaks / z.react.touches >= 0.6 ? 'var(--red)' : 'var(--muted)'}">📊 ${esc(ZoneMath.reactText(z.react))} <span class="muted">(10봉 안에 1.5 ATR 반등 / 0.5 ATR 넘게 뚫림)</span></div>
       <ul>${z.items.map((x) => `<li><b>${esc(x.label)}</b> ${f(x.p)}${x.touches > 1 ? ` <span class="muted">(${x.touches}번 반등)</span>` : ''}</li>`).join('')}</ul></div>`).join('');
   const singles = r.candidates.filter((x) => x.p < r.price && !r.zones.some((z) => x.p >= z.low && x.p <= z.high)).sort((a, b) => b.p - a.p).slice(0, 5);
   $('#zs').innerHTML = `<div class="card"><h2>검토 구간 <span class="muted">(근거 2가지 이상 겹침)</span></h2>
@@ -305,12 +319,13 @@ function drawChart(cv, cs, r, f) {
 /* ───────── 근거 설명 ───────── */
 function viewLearn() {
   setTitle('근거 설명');
-  const keys = ['swing', 'poc', 'val', 'ma60', 'ma120', 'ma200', 'bb', 'fib382', 'fib500', 'fib618', 'rsi'];
+  const keys = ['swing', 'flip', 'wk', 'poc', 'val', 'hvn', 'ma60', 'ma120', 'ma200', 'bb', 'fib382', 'fib500', 'fib618', 'rsi'];
   view().innerHTML = `<div class="card"><h2>검토 구간은 이렇게 정합니다</h2><ol class="steps">
       <li>현재가 아래(1% 위까지)에 있는 근거 가격을 모두 구합니다.</li>
       <li>가까운 근거끼리(평균 변동폭 ATR의 0.6배 안) 하나로 묶습니다.</li>
       <li>서로 <b>다른 종류의 근거가 2가지 이상</b> 겹친 묶음만 '검토 구간'으로 보여 줍니다. 이동평균 여러 개, 피보나치 여러 개는 한 종류로 칩니다.</li>
-      <li>점수 = 근거 종류 수(+ 지지선이 여러 번 확인되면 최대 1점). 구간 폭은 ATR의 0.25배씩 넓힙니다.</li></ol>
+      <li>점수 = 근거 종류 수(+ 지지선·저항→지지가 여러 번 확인되면 최대 1점). 매물대 중심·하단·마디는 한 종류(매물대)로 칩니다. 구간 폭은 ATR의 0.25배씩 넓히고, 한 구간은 ATR 1.5배보다 넓어지지 않게 나눕니다.</li>
+      <li><b>과거 반응</b>: 가격이 위에서 내려와 그 구간에 닿은 때마다, 10봉 안에 구간 위로 1.5 ATR 이상 반등했는지 / 구간 아래로 0.5 ATR 넘게 뚫렸는지 셉니다. 2번 이상 닿아 60% 이상 반등이면 점수 +0.5, 60% 이상 뚫렸으면 −0.5. 구간을 만든 저점 자체도 세어지므로 참고용입니다.</li></ol>
       <div class="warnlist">겹치는 근거가 많아도 가격은 더 내려갈 수 있습니다. 구간은 '많은 사람이 보는 자리'일 뿐 바닥 보장이 아닙니다. 선물은 레버리지 때문에 손실이 원금보다 커질 수 있습니다. 손절 기준과 나눠 사기 계획을 따로 정해 두세요.</div></div>
     ${keys.map((k) => `<div class="card"><b>${esc(ZoneMath.LABEL[k])}</b><div class="muted" style="margin-top:4px">${esc(ZoneMath.WHY[k])}</div></div>`).join('')}
     <div class="card"><b>ATR (평균 변동폭)</b><div class="muted" style="margin-top:4px">최근 14개 봉의 평균 움직임 크기입니다. 근거를 묶는 거리와 구간 폭을 정하는 데 씁니다.</div></div>`;

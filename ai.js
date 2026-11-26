@@ -54,7 +54,7 @@ async function aiGather(w) {
   const v20 = cs.slice(-20).reduce((s, k) => s + k.v, 0) / Math.min(20, n);
   const at = (arr) => r2(arr[n - 1]);
   const rows = cs.slice(-15).map((k, j) => { const i = n - 15 + j; return `| ${d(k.t)} | ${r2(k.o)} | ${r2(k.h)} | ${r2(k.l)} | ${r2(k.c)} | ${Math.round(k.v).toLocaleString('en-US')} | ${r2(I.rsi[i], 1)} | ${r2(I.macdh[i], 3)} |`; });
-  const zr = ZoneMath.analyze(cs);
+  const zr = ZoneMath.analyze(cs, { tf: 'day' });
   const zones = zr.error ? `계산 못 함: ${zr.error}` : zr.zones.length ? zr.zones.map((z, i) => `- 구간 ${i + 1}: ${r2(z.low)} ~ ${r2(z.high)} 달러 (근거 ${z.kinds}가지, 점수 ${z.score}): ${[...new Set(z.items.map((x) => x.label))].join(', ')}`).join('\n') : '현재가 아래에 근거 2가지 이상 겹치는 구간 없음';
   const price = `기준일 ${d(last.t)} 종가 ${r2(last.c)} 달러 (일봉 ${n}개, ${d(cs[0].t)}부터)
 변화율: 1일 ${r2(ch(1))}% · 5일 ${r2(ch(5))}% · 20일 ${r2(ch(20))}% · 전체 기간 ${r2(((last.c - cs[0].c) / cs[0].c) * 100)}%

@@ -26,7 +26,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 11;
+const VERSION = 12;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -56,14 +56,20 @@ function doPost(e) {
     if (d.action === 'saveNq') { P.setProperty('NQ_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); if (d.enabled) P.deleteProperty('NQ_STATE'); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
     if (d.action === 'saveWatch') {
-      const items = (d.items || []).slice(0, 40).map((x) => ({
+      const old = {}; watch_().forEach((x) => { old[x.cat + ':' + x.sym] = x; });
+      const items0 = (d.items || []).slice(0, 40).map((x) => ({
         cat: CATS_.indexOf(x.cat) >= 0 ? x.cat : 'coin',
         sym: String(x.sym || x.market || '').toUpperCase().replace(/[^A-Z0-9.\-]/g, '').slice(0, 24),
         ex: String(x.ex || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 8),
         name: String(x.name || '').slice(0, 40), tf: String(x.tf || '').slice(0, 10),
         tfk: TFK_[x.tfk] ? x.tfk : TFK_LABEL_[x.tf] || 'day', calcAt: new Date().toISOString(),
-        zones: (x.zones || []).slice(0, 5).map((z) => ({ low: Number(z.low), high: Number(z.high), score: Number(z.score) || 0, labels: (z.labels || []).slice(0, 8).map(String) })).filter((z) => z.low > 0 && z.high >= z.low),
+        zones: (x.zones || []).slice(0, 5).map((z) => ({ low: Number(z.low), high: Number(z.high), score: Number(z.score) || 0, labels: (z.labels || []).slice(0, 10).map(String), react: String(z.react || '').slice(0, 60) })).filter((z) => z.low > 0 && z.high >= z.low),
+        src: String(x.src || '').slice(0, 40), keep: !!x.keep,
       })).filter((x) => x.sym && (x.cat !== 'coin' || /^KRW-[A-Z0-9]+$/.test(x.sym)));
+      // 같은 종목은 하나만(뒤에 온 것), 앱이 시세를 못 받아 구간 없이 보낸 종목(keep)은 스크립트가 가진 예전 구간을 그대로 씀
+      const seen = {}, items = [];
+      items0.forEach((x) => { seen[x.cat + ':' + x.sym] = x; });
+      Object.keys(seen).forEach((k) => { const x = seen[k], o = old[k]; if (x.keep && !x.zones.length && o) { x.zones = o.zones || []; x.calcAt = o.calcAt; x.rc = o.rc; } delete x.keep; items.push(x); });
       const lock = LockService.getScriptLock(); lock.waitLock(20000); // 재계산과 겹치지 않게
       try { writeWatch_({ at: new Date().toISOString(), items: items, recalc: watchMeta_().recalc || null }); } finally { lock.releaseLock(); }
       return json_({ ok: true, coins: items.length, zones: items.reduce((s, x) => s + x.zones.length, 0) });
@@ -89,15 +95,24 @@ function 가격확인() {
   // 코인: 업비트 한 번에
   const coins = items.filter((x) => x.cat === 'coin');
   if (coins.length) {
-    const r = UrlFetchApp.fetch('https://api.upbit.com/v1/ticker?markets=' + coins.map((x) => x.sym).join(','), { muteHttpExceptions: true });
-    if (r.getResponseCode() === 200) JSON.parse(r.getContentText()).forEach((t) => { price['coin:' + t.market] = t.trade_price; });
+    const ms = Array.from(new Set(coins.map((x) => x.sym)));
+    // 업비트는 모르는 종목이 섞이면 전체를 거절 → 한 번에 시도하고, 못 받은 종목은 빗썸에서
+    try { const r = UrlFetchApp.fetch('https://api.upbit.com/v1/ticker?markets=' + ms.join(','), { muteHttpExceptions: true }); if (r.getResponseCode() === 200) JSON.parse(r.getContentText()).forEach((t) => { price['coin:' + t.market] = t.trade_price; }); } catch (e) { /* 빗썸으로 */ }
+    const rest = ms.filter((m) => !price['coin:' + m]);
+    if (rest.length) { try { const r = UrlFetchApp.fetch('https://api.bithumb.com/v1/ticker?markets=' + rest.join(','), { muteHttpExceptions: true }); if (r.getResponseCode() === 200) JSON.parse(r.getContentText()).forEach((t) => { price['coin:' + t.market] = t.trade_price; }); } catch (e) { /* 다음에 */ } }
   }
   // 코인선물: 바이낸스 → 막히면 OKX
   items.filter((x) => x.cat === 'cfut').forEach((x) => { const p = cfutPrice_(x.sym); if (p) price['cfut:' + x.sym] = p; });
-  // 해외주식: 3시간마다만(무료 한도)
+  // 해외주식: OKX·바이비트에 같은 종목 무기한 선물이 있으면 그 가격으로 10분마다(24시간 거래라 장 밖 시간 값도 섞임)
+  const usItems = items.filter((x) => x.cat === 'us'), srcOf = {};
+  if (usItems.length) {
+    try { const m = {}; okx_('/market/tickers?instType=SWAP').forEach((t) => { m[t.instId] = +t.last; }); usItems.forEach((x) => { const p = m[x.sym + '-USDT-SWAP']; if (p) { price['us:' + x.sym] = p; srcOf['us:' + x.sym] = 'OKX 선물가'; } }); } catch (e) { /* 바이비트로 */ }
+    usItems.filter((x) => !price['us:' + x.sym]).forEach((x) => { const p = bybitPrice_(x.sym + 'USDT'); if (p) { price['us:' + x.sym] = p; srcOf['us:' + x.sym] = '바이비트 선물가'; } });
+  }
+  // 선물이 없는 해외주식만 Alpha Vantage로 3시간마다(무료 한도)
   const lastUs = Number(P.getProperty('LAST_US') || 0);
-  if (items.some((x) => x.cat === 'us') && now - lastUs > US_CHECK_H * 3600e3 && P.getProperty('ALPHAVANTAGE_API_KEY')) {
-    items.filter((x) => x.cat === 'us').slice(0, 5).forEach((x) => {
+  if (usItems.some((x) => !price['us:' + x.sym]) && now - lastUs > US_CHECK_H * 3600e3 && P.getProperty('ALPHAVANTAGE_API_KEY')) {
+    usItems.filter((x) => !price['us:' + x.sym]).slice(0, 5).forEach((x) => {
       try { const q = avFetch_({ function: 'GLOBAL_QUOTE', symbol: x.sym }, 0); const p = Number(q && q['Global Quote'] && q['Global Quote']['05. price']); if (p) price['us:' + x.sym] = p; } catch (e) { /* 다음에 */ }
     });
     P.setProperty('LAST_US', String(now));
@@ -113,19 +128,22 @@ function 가격확인() {
   }
   const zid = (x, z) => x.cat + ':' + x.sym + '|' + z.low.toPrecision(8) + '|' + z.high.toPrecision(8);
   const state = JSON.parse(readWatchRaw_('STATE'));
+  // 예전 상태 키에서 종목·범위를 읽어 둠(같은 종목에서 범위가 겹치면 같은 구간으로 봄)
+  const oldBy = {}; Object.keys(state).forEach((k) => { const p = k.split('|'); if (p.length === 3) (oldBy[p[0]] = oldBy[p[0]] || []).push({ k: k, low: Number(p[1]), high: Number(p[2]) }); });
+  const inherit = (x, z) => { const L = oldBy[x.cat + ':' + x.sym] || []; let best = null; L.forEach((o) => { const ov = Math.min(o.high, z.high) - Math.max(o.low, z.low); if (ov > 0 && (!best || ov > best.ov)) best = { ov: ov, s: state[o.k] }; }); return best ? { inside: best.s.inside, last: best.s.last } : null; };
   items.forEach((x) => {
     const p = price[x.cat + ':' + x.sym];
     if (!p) return;
     x.zones.forEach((z, i) => {
       const id = zid(x, z);
-      const s = state[id] || { inside: false, last: 0 };
+      const s = state[id] || inherit(x, z) || { inside: false, last: 0 };
       const inside = p >= z.low && p <= z.high;
       if (inside && !s.inside && now - s.last > COOLDOWN_H * 3600e3) {
         const unit = x.cat === 'coin' || x.cat === 'kr' ? '원' : x.cat === 'us' ? ' 달러' : x.cat === 'cfut' ? ' USDT' : '';
         send_('🔔 [' + CAT_LABEL_[x.cat] + '] ' + x.name + ' (' + (x.cat === 'coin' ? x.sym.slice(4) : x.sym) + ') 검토 구간 진입\n' +
           '현재가 ' + fmt_(p) + unit + '\n' +
           '구간 ' + (i + 1) + ': ' + fmt_(z.low) + ' ~ ' + fmt_(z.high) + ' (' + x.tf + ', 근거 점수 ' + z.score + ')\n' +
-          '근거: ' + z.labels.join(', ') + (x.calcAt ? '\n구간 계산: ' + Utilities.formatDate(new Date(x.calcAt), 'Asia/Seoul', 'M/d HH:mm') + (x.rc ? ' (자동)' : ' (앱)') : '') + '\n\n' +
+          '근거: ' + z.labels.join(', ') + (z.react ? '\n과거 반응: ' + z.react : '') + (srcOf[x.cat + ':' + x.sym] ? '\n가격 출처: ' + srcOf[x.cat + ':' + x.sym] : '') + (x.calcAt ? '\n구간 계산: ' + Utilities.formatDate(new Date(x.calcAt), 'Asia/Seoul', 'M/d HH:mm') + (x.rc ? ' (자동)' : ' (앱)') : '') + '\n\n' +
           '※ 공부용 알림입니다. 매수 추천이 아니며 결정과 책임은 본인에게 있습니다.' + (x.cat === 'cfut' || x.cat === 'ffut' ? ' 선물은 손실이 원금보다 커질 수 있습니다.' : ''));
         s.last = now;
       }
@@ -184,9 +202,10 @@ function 구간재계산_(force) {
       if (!force && x.rcDay === today) return;
       if (Date.now() - start > RECALC_BUDGET_MS) { res.left++; return; }
       try {
-        const r = ZoneMath.analyze(serverCandles_(x));
+        const cs = serverCandles_(x), r = ZoneMath.analyze(cs, { tf: TFK_[x.tfk] ? x.tfk : 'day' });
         if (r.error) throw new Error(r.error);
-        x.zones = r.zones.slice(0, 5).map((z) => ({ low: z.low, high: z.high, score: z.score, labels: Array.from(new Set(z.items.map((i) => i.label))).slice(0, 8) }));
+        x.zones = r.zones.slice(0, 5).map((z) => ({ low: z.low, high: z.high, score: z.score, labels: Array.from(new Set(z.items.map((i) => i.label))).slice(0, 10), react: ZoneMath.reactText(z.react) }));
+        if (cs.src) x.src = cs.src;
         x.calcAt = new Date().toISOString(); x.rc = 1; delete x.rcErr;
         res.done++;
       } catch (e) {
@@ -217,7 +236,7 @@ function 재계산점검() {
   if (P.getProperty('DATA_GO_KR_KEY') || P.getProperty('KIS_APP_KEY')) samples.push({ cat: 'kr', sym: '005930', name: '삼성전자', tfk: 'day' });
   samples.forEach((x) => {
     try {
-      const cs = serverCandles_(x), r = ZoneMath.analyze(cs);
+      const cs = serverCandles_(x), r = ZoneMath.analyze(cs, { tf: TFK_[x.tfk] ? x.tfk : 'day' });
       Logger.log('✅ [' + CAT_LABEL_[x.cat] + '] ' + x.name + ' ' + TFK_[x.tfk] + ' — 봉 ' + cs.length + '개, 현재 ' + fmt_(cs[cs.length - 1].c) + (r.error ? ' / ' + r.error : ' / 구간 ' + r.zones.length + '개: ' + (r.zones.map((z) => fmt_(z.low) + '~' + fmt_(z.high)).join(' / ') || '아래 겹치는 구간 없음')));
     } catch (e) { Logger.log('❌ [' + CAT_LABEL_[x.cat] + '] ' + x.name + ' — ' + (e && e.message || e)); }
   });
@@ -227,16 +246,20 @@ function serverCandles_(x) {
   const tf = TFK_[x.tfk] ? x.tfk : TFK_LABEL_[x.tf] || 'day';
   if (x.cat === 'coin') {
     const unit = { day: 'days', h4: 'minutes/240', h1: 'minutes/60' }[tf] || 'days';
-    let out = [], to = '';
+    let out = [], to = '', src = '업비트';
     for (let k = 0; k < 2; k++) {
-      const r = upbitRelay_('/candles/' + unit + '?market=' + x.sym + '&count=200' + (to ? '&to=' + encodeURIComponent(to) : ''));
+      let r = upbitRelay_('/candles/' + unit + '?market=' + x.sym + '&count=200' + (to ? '&to=' + encodeURIComponent(to) : ''));
+      if ((!r.ok || !r.data || !r.data.length) && k === 0) { r = bithumbGet_('/candles/' + unit + '?market=' + x.sym + '&count=200'); src = '빗썸'; } // 업비트에 없거나 막히면 빗썸
+      else if (src === '빗썸') r = bithumbGet_('/candles/' + unit + '?market=' + x.sym + '&count=200' + (to ? '&to=' + encodeURIComponent(to) : ''));
       if (!r.ok) throw new Error(r.error);
       out = out.concat(r.data);
       if (r.data.length < 200) break;
       to = r.data[r.data.length - 1].candle_date_time_utc + 'Z';
       Utilities.sleep(150);
     }
-    return out.reverse().map((k) => ({ t: k.timestamp, o: k.opening_price, h: k.high_price, l: k.low_price, c: k.trade_price, v: k.candle_acc_trade_volume }));
+    // 봉 시각은 봉이 시작한 시각(앱과 같게), 같은 봉이 겹치면 하나만
+    const seen = {}, cs = out.reverse().filter((k) => !seen[k.candle_date_time_utc] && (seen[k.candle_date_time_utc] = 1)).map((k) => ({ t: Date.parse(k.candle_date_time_utc + 'Z'), o: k.opening_price, h: k.high_price, l: k.low_price, c: k.trade_price, v: k.candle_acc_trade_volume }));
+    cs.src = src; return cs;
   }
   if (x.cat === 'cfut') {
     const iv = { day: '1d', h4: '4h', h1: '1h' }[tf] || '1d';
@@ -244,19 +267,21 @@ function serverCandles_(x) {
       const r = UrlFetchApp.fetch('https://fapi.binance.com/fapi/v1/klines?symbol=' + encodeURIComponent(x.sym) + '&interval=' + iv + '&limit=500', { muteHttpExceptions: true });
       if (r.getResponseCode() === 200) return JSON.parse(r.getContentText()).map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
     } catch (e) { /* OKX로 */ }
-    const bar = { day: '1Dutc', h4: '4H', h1: '1H' }[tf] || '1Dutc';
-    const r = UrlFetchApp.fetch('https://www.okx.com/api/v5/market/candles?instId=' + encodeURIComponent(x.sym.replace(/USDT$/, '') + '-USDT-SWAP') + '&bar=' + bar + '&limit=300', { muteHttpExceptions: true });
-    const j = JSON.parse(r.getContentText() || '{}');
-    if (r.getResponseCode() !== 200 || j.code !== '0') throw new Error('코인선물 봉 데이터 오류(바이낸스·OKX) ' + r.getResponseCode());
-    return (j.data || []).map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).reverse();
+    return perpCandles_(x.sym.replace(/USDT$/, ''), tf);
   }
   if (x.cat === 'us') {
     if (!PropertiesService.getScriptProperties().getProperty('ALPHAVANTAGE_API_KEY')) throw new Error('ALPHAVANTAGE_API_KEY 없음');
     const fn = tf === 'week' ? 'TIME_SERIES_WEEKLY' : 'TIME_SERIES_DAILY';
-    const j = avFetch_({ function: fn, symbol: x.sym }, AV_FN_[fn]);
-    const key = Object.keys(j).find((k) => /Time Series/i.test(k));
-    if (!key) throw new Error(j.Note || j.Information || j['Error Message'] || 'Alpha Vantage 응답에 시세가 없음');
-    return Object.keys(j[key]).map((day) => { const v = j[key][day]; return { t: Date.parse(day + 'T00:00:00Z'), o: +v['1. open'], h: +v['2. high'], l: +v['3. low'], c: +v['4. close'], v: +v['5. volume'] }; }).sort((a, b) => a.t - b.t);
+    try {
+      const j = avFetch_({ function: fn, symbol: x.sym }, AV_FN_[fn]);
+      const key = Object.keys(j).find((k) => /Time Series/i.test(k));
+      if (!key) throw new Error(j.Note || j.Information || j['Error Message'] || 'Alpha Vantage 응답에 시세가 없음');
+      const cs = Object.keys(j[key]).map((day) => { const v = j[key][day]; return { t: Date.parse(day + 'T00:00:00Z'), o: +v['1. open'], h: +v['2. high'], l: +v['3. low'], c: +v['4. close'], v: +v['5. volume'] }; }).sort((a, b) => a.t - b.t);
+      cs.src = 'Alpha Vantage'; return cs;
+    } catch (e) {
+      // 무료 한도·오류 → 같은 종목 OKX·바이비트 선물 봉으로 대신
+      try { const cs = perpCandles_(x.sym, 'day'); const out = tf === 'week' ? toWeekly_(cs) : cs; out.src = cs.src + '(Alpha Vantage 대신)'; return out; } catch (e2) { throw e; }
+    }
   }
   const P = PropertiesService.getScriptProperties(), kis = !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'));
   if (x.cat === 'kr') {
@@ -985,7 +1010,8 @@ const NQ = (() => {
 
 /* ==== zones.js 시작 (앱과 같은 계산식 — alert/build.mjs가 ../zones.js에서 그대로 복사, 직접 고치지 말 것) ==== */
 /* 가격 위치 — 매수 검토 구간 계산(공부용)
-   여러 근거(지지선·매물대·이동평균·볼린저·피보나치·RSI 과매도·ATR)가 겹치는 가격대를 찾아 점수를 매긴다.
+   여러 근거(지지선·저항→지지 전환·매물대·매물 마디·주봉 지지·이동평균·볼린저·피보나치·RSI 과매도·ATR)가 겹치는 가격대를 찾아 점수를 매기고,
+   구간마다 과거에 그 가격대에 닿았을 때 실제로 반등했는지(과거 반응)를 세어 함께 보여 준다.
    매수 추천이 아니라 '가격이 어느 위치에 있는지' 공부하기 위한 계산이다.
    입력 candles: 오래된 것부터 [{t, o, h, l, c, v}] */
 
@@ -1022,6 +1048,46 @@ const ZoneMath = (() => {
     }
     return out;
   }
+  // 좌우 w개보다 높은 고점(스윙 고점)
+  function swingHighs(cs, w = 5) {
+    const out = [];
+    for (let i = w; i < cs.length - w; i++) {
+      let ok = true;
+      for (let k = i - w; k <= i + w && ok; k++) if (k !== i && cs[k].h > cs[i].h) ok = false;
+      if (ok) out.push({ i, p: cs[i].h });
+    }
+    return out;
+  }
+  // 일봉 → 주봉(월요일 시작, 한국 시간)
+  function weekly(cs) {
+    const out = [];
+    for (const k of cs) {
+      const d = new Date(k.t + 9 * 3600e3), wk = Math.floor((d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400e3) / (7 * 86400e3));
+      const last = out[out.length - 1];
+      if (last && last.wk === wk) { last.h = Math.max(last.h, k.h); last.l = Math.min(last.l, k.l); last.c = k.c; last.v += k.v; }
+      else out.push({ wk, t: k.t, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v });
+    }
+    return out;
+  }
+  // 과거 반응: 가격이 위에서 내려와 이 구간에 닿은 때마다, 그 뒤 10봉 안에 구간 위로 1.5 ATR 이상 반등했는지 / 구간 아래로 0.5 ATR 넘게 뚫렸는지
+  // (마지막 5봉은 결과를 아직 모르므로 뺌. 구간을 만든 저점 자체도 포함되므로 참고용)
+  function reaction(cs, low, high, A) {
+    let touches = 0, bounces = 0, breaks = 0, i = 1;
+    const end = cs.length - 5;
+    while (i < end) {
+      if (cs[i - 1].l > high && cs[i].l <= high && cs[i].h >= low) {
+        touches++;
+        let res = 0;
+        for (let k = i; k < Math.min(cs.length, i + 10) && !res; k++) {
+          if (cs[k].c < low - A * 0.5) res = -1;
+          else if (cs[k].h >= high + A * 1.5) res = 1;
+        }
+        if (res > 0) bounces++; else if (res < 0) breaks++;
+        i += 3; // 같은 닿음을 여러 번 세지 않게
+      } else i++;
+    }
+    return { touches, bounces, breaks };
+  }
   // 거래량 프로파일: 가격대별 거래량 → POC(가장 많이 거래된 가격), VAL(거래 70%가 몰린 구간의 아래 끝)
   function volumeProfile(cs, bins = 40) {
     const lo = Math.min(...cs.map((k) => k.l)), hi = Math.max(...cs.map((k) => k.h));
@@ -1046,6 +1112,7 @@ const ZoneMath = (() => {
   const LABEL = {
     swing: '지지선', poc: '매물대 중심(POC)', val: '매물대 하단(VAL)', ma60: '60봉 이동평균', ma120: '120봉 이동평균', ma200: '200봉 이동평균',
     bb: '볼린저 밴드 하단', fib382: '피보나치 38.2%', fib500: '피보나치 50%', fib618: '피보나치 61.8%', rsi: 'RSI 과매도 때 가격',
+    flip: '저항→지지 전환', hvn: '매물 마디(HVN)', wk: '주봉 지지선',
   };
   const WHY = {
     swing: '과거에 여러 번 떨어지다 멈추고 반등한 가격입니다. 같은 가격에서 사려는 사람이 많았다는 뜻이라 다시 멈출 수 있습니다.',
@@ -1059,9 +1126,14 @@ const ZoneMath = (() => {
     fib500: '직전 상승폭의 절반을 되돌린 가격입니다.',
     fib618: '직전 상승폭의 61.8%만큼 되돌린 가격입니다. 깊은 조정의 마지노선으로 많이 봅니다.',
     rsi: 'RSI(14)가 30 아래(과매도)였던 때의 종가 중간값입니다. 과거에 많이 팔렸던 가격대입니다.',
+    flip: '예전에 여러 번 막혔던 고점(저항)을 가격이 뚫고 올라간 자리입니다. 뚫린 저항은 다시 내려올 때 지지가 되는 경우가 많습니다(역할 전환).',
+    hvn: 'POC 말고도 거래가 유난히 많이 쌓인 가격 마디입니다(평균의 1.3배 이상). 많은 사람이 사고판 가격이라 멈추기 쉽습니다.',
+    wk: '일봉을 주봉으로 묶어 찾은 주봉 저점입니다. 더 큰 단위에서도 멈췄던 가격이라 일봉 지지선보다 무게가 있습니다.',
   };
 
-  function analyze(cs) {
+  // opt.tf: 'day'면 주봉 지지도 같이 봄
+  function analyze(cs, opt) {
+    opt = opt || {};
     const n = cs.length;
     if (n < 60) return { error: '데이터가 60개 봉보다 적어 계산할 수 없습니다' };
     const c = cs.map((k) => k.c), price = c[n - 1];
@@ -1099,20 +1171,43 @@ const ZoneMath = (() => {
     // 6) RSI 과매도 때 종가 중간값(최근 200봉)
     const os = []; for (let i = Math.max(0, n - 200); i < n; i++) if (rsi[i] != null && rsi[i] < 30) os.push(c[i]);
     if (os.length >= 2) { os.sort((a, b) => a - b); add('rsi', os[Math.floor(os.length / 2)], { count: os.length }); }
+    // 7) 저항→지지 전환: 최근 200봉 스윙 고점 중 지금 가격 아래로 내려와 있는 것(이미 뚫은 저항)
+    const highs = swingHighs(recent).map((h) => ({ ...h, i: h.i + off })).filter((h) => h.p < price && h.i < n - 3);
+    const hg = [];
+    for (const h of highs.sort((a, b) => a.p - b.p)) {
+      const g = hg.find((x) => Math.abs(x.p - h.p) <= A * 0.5);
+      if (g) { g.list.push(h); g.p = g.list.reduce((x, y) => x + y.p, 0) / g.list.length; } else hg.push({ p: h.p, list: [h] });
+    }
+    for (const g of hg) add('flip', g.p, { touches: g.list.length });
+    // 8) 매물 마디: 거래량 프로파일에서 POC 말고 평균 1.3배 이상 쌓인 봉우리
+    if (vp) {
+      const avgV = vp.bins.reduce((x, y) => x + y, 0) / vp.bins.length;
+      vp.bins.forEach((v, j) => { const p = vp.lo + vp.step * (j + 0.5); if (v >= avgV * 1.3 && (j === 0 || v >= vp.bins[j - 1]) && (j === vp.bins.length - 1 || v >= vp.bins[j + 1]) && Math.abs(p - vp.poc) > vp.step) add('hvn', p); });
+    }
+    // 9) 주봉 지지(일봉일 때): 주봉 스윙 저점(좌우 3주), 최근 2년
+    if (opt.tf === 'day') {
+      const wk = weekly(cs).slice(-104);
+      if (wk.length >= 20) for (const s2 of swingLows(wk, 3)) if (s2.p < price) add('wk', s2.p);
+    }
 
     // 현재가 아래(+1% 위까지) 근거만 → ATR 0.6배 안의 근거끼리 묶어 구간을 만든다
     const below = cand.filter((x) => x.p <= price * 1.01).sort((a, b) => b.p - a.p);
     const zones = [];
     for (const x of below) {
-      const z = zones.find((q) => x.p >= q.min - A * 0.6 && x.p <= q.max + A * 0.6);
+      // 구간 폭은 ATR 1.5배까지만(가까운 근거가 줄줄이 이어져 구간이 너무 넓어지지 않게)
+      const z = zones.find((q) => x.p >= q.min - A * 0.6 && x.p <= q.max + A * 0.6 && Math.max(q.max, x.p) - Math.min(q.min, x.p) <= A * 1.5);
       if (z) { z.items.push(x); z.min = Math.min(z.min, x.p); z.max = Math.max(z.max, x.p); } else zones.push({ min: x.p, max: x.p, items: [x] });
     }
     const out = zones.map((z) => {
-      const kinds = new Set(z.items.map((x) => (x.key.startsWith('fib') ? 'fib' : x.key.startsWith('ma') ? 'ma' : x.key)));
-      const touchBonus = Math.min(1, z.items.filter((x) => x.key === 'swing').reduce((s, x) => s + Math.max(0, x.touches - 1), 0) * 0.5);
-      const score = kinds.size + touchBonus;
+      // 같은 성격의 근거는 한 가지로 셈(피보나치 3개·이동평균 3개·매물대(POC·VAL·마디)가 한 구간에 겹쳐도 각각 1)
+      const kinds = new Set(z.items.map((x) => (x.key.startsWith('fib') ? 'fib' : x.key.startsWith('ma') ? 'ma' : x.key === 'poc' || x.key === 'val' || x.key === 'hvn' ? 'vol' : x.key)));
+      const touchBonus = Math.min(1, z.items.filter((x) => x.key === 'swing' || x.key === 'flip').reduce((s, x) => s + Math.max(0, x.touches - 1), 0) * 0.5);
       const low = z.min - A * 0.25, high = Math.min(z.max + A * 0.25, price * 1.01);
-      return { low, high, mid: (low + high) / 2, score: Math.round(score * 10) / 10, kinds: kinds.size, items: z.items.sort((a, b) => b.p - a.p), distPct: ((z.max - price) / price) * 100 };
+      const rx = reaction(cs, low, high, A);
+      // 과거 반응: 2번 이상 닿았을 때 반등이 많으면 +0.5, 뚫림이 많으면 −0.5
+      const rxBonus = rx.touches >= 2 ? (rx.bounces / rx.touches >= 0.6 ? 0.5 : rx.breaks / rx.touches >= 0.6 ? -0.5 : 0) : 0;
+      const score = kinds.size + touchBonus + rxBonus;
+      return { low, high, mid: (low + high) / 2, score: Math.round(score * 10) / 10, kinds: kinds.size, items: z.items.sort((a, b) => b.p - a.p), distPct: ((z.max - price) / price) * 100, react: rx };
     }).filter((z) => z.kinds >= 2).sort((a, b) => b.score - a.score || b.high - a.high).slice(0, 4).sort((a, b) => b.high - a.high);
 
     const H52 = Math.max(...cs.slice(-365).map((k) => k.h)), L52 = Math.min(...cs.slice(-365).map((k) => k.l));
@@ -1124,11 +1219,40 @@ const ZoneMath = (() => {
       trend: ma200 ? (price > ma200 ? '200봉 평균 위(장기 상승 쪽)' : '200봉 평균 아래(장기 하락 쪽)') : ma60 ? (price > ma60 ? '60봉 평균 위' : '60봉 평균 아래') : '',
     };
   }
-  return { analyze, rsiSeries, atr, swingLows, volumeProfile, LABEL, WHY };
+  // 과거 반응 한 줄(앱·알림 공통)
+  const reactText = (rx) => (!rx || !rx.touches ? '과거에 위에서 내려와 닿은 적 없음' : `과거 ${rx.touches}번 닿아 반등 ${rx.bounces}번 · 뚫림 ${rx.breaks}번`);
+  return { analyze, rsiSeries, atr, swingLows, swingHighs, volumeProfile, weekly, reaction, reactText, LABEL, WHY };
 })();
 /* ==== zones.js 끝 ==== */
 
 /* ───────── 코인선물 현재가: 바이낸스(구글 서버 위치에서 막힐 수 있음) → OKX ───────── */
+// 빗썸 공개 시세(업비트와 같은 모양): 시세 주소만 허용, 30초 캐시
+function bithumbGet_(path) {
+  const ok = /^\/candles\/(days|minutes\/240|minutes\/60)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) || /^\/ticker\?markets=KRW-[A-Z0-9]+(,KRW-[A-Z0-9]+){0,29}$/.test(path);
+  if (!ok) return { ok: false, error: '허용하지 않는 빗썸 주소입니다' };
+  try {
+    const r = UrlFetchApp.fetch('https://api.bithumb.com/v1' + path, { muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) return { ok: false, error: '빗썸 응답 ' + r.getResponseCode() };
+    const d = JSON.parse(r.getContentText()); return Array.isArray(d) ? { ok: true, data: d } : { ok: false, error: '빗썸 응답 이상' };
+  } catch (e) { return { ok: false, error: '빗썸 연결 실패' }; }
+}
+function bybitPrice_(sym) {
+  try { const r = UrlFetchApp.fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol=' + encodeURIComponent(sym), { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) return 0; const j = JSON.parse(r.getContentText()); const t = j.result && j.result.list && j.result.list[0]; return t ? Number(t.lastPrice) || 0 : 0; } catch (e) { return 0; }
+}
+// 기초 이름(BTC, NVDA 등)의 무기한 선물 봉: OKX → 바이비트(끝난 봉만, 오래된 것부터)
+function perpCandles_(base, tf) {
+  const B = { day: ['1Dutc', 'D', 86400e3], h4: ['4H', '240', 4 * 3600e3], h1: ['1H', '60', 3600e3] }[tf] || ['1Dutc', 'D', 86400e3];
+  try {
+    const d = okx_('/market/candles?instId=' + encodeURIComponent(base) + '-USDT-SWAP&bar=' + B[0] + '&limit=300');
+    const cs = d.filter((k) => k[8] === undefined || k[8] === '1').map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).reverse();
+    if (cs.length >= 30) { cs.src = 'OKX 선물'; return cs; }
+  } catch (e) { /* 바이비트로 */ }
+  const r = UrlFetchApp.fetch('https://api.bybit.com/v5/market/kline?category=linear&symbol=' + encodeURIComponent(base) + 'USDT&interval=' + B[1] + '&limit=300', { muteHttpExceptions: true });
+  const j = JSON.parse(r.getContentText() || '{}');
+  if (r.getResponseCode() !== 200 || j.retCode !== 0) throw new Error(base + ': 바이낸스·OKX·바이비트 선물 봉을 받지 못함(' + r.getResponseCode() + ')');
+  const cs = (j.result.list || []).filter((k) => +k[0] + B[2] <= Date.now()).map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).reverse();
+  cs.src = '바이비트 선물'; return cs;
+}
 function cfutPrice_(sym) {
   try {
     const r = UrlFetchApp.fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=' + encodeURIComponent(sym), { muteHttpExceptions: true });
@@ -1138,8 +1262,8 @@ function cfutPrice_(sym) {
     const inst = sym.replace(/USDT$/, '') + '-USDT-SWAP';
     const r = UrlFetchApp.fetch('https://www.okx.com/api/v5/market/ticker?instId=' + encodeURIComponent(inst), { muteHttpExceptions: true });
     if (r.getResponseCode() === 200) { const j = JSON.parse(r.getContentText()); const p = Number(j.data && j.data[0] && j.data[0].last); if (p) return p; }
-  } catch (e) { /* 없음 */ }
-  return 0;
+  } catch (e) { /* 바이비트로 */ }
+  return bybitPrice_(sym);
 }
 
 /* ───────── Alpha Vantage(해외주식): 키는 여기만, 결과는 캐시(무료 하루 25회) ───────── */
@@ -1320,9 +1444,16 @@ function krxKey_() {
   return /%[0-9A-Fa-f]{2}/.test(k) ? k : encodeURIComponent(k); // '인코딩' 키를 넣어도, '디코딩' 키를 넣어도 됨
 }
 function krxGet_(params) {
-  const url = KRX_URL_ + '?serviceKey=' + krxKey_() + '&resultType=json&' + Object.keys(params).map((k) => k + '=' + encodeURIComponent(params[k])).join('&');
-  const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  const t = r.getContentText();
+  const q = '&resultType=json&' + Object.keys(params).map((k) => k + '=' + encodeURIComponent(params[k])).join('&');
+  let r = UrlFetchApp.fetch(KRX_URL_ + '?serviceKey=' + krxKey_() + q, { muteHttpExceptions: true });
+  let t = r.getContentText();
+  // '등록되지 않은 서비스키'면 키를 다른 모양(인코딩↔디코딩)으로 한 번 더
+  if (/SERVICE_KEY_IS_NOT_REGISTERED|등록되지 않은/.test(t)) {
+    const raw = String(PropertiesService.getScriptProperties().getProperty('DATA_GO_KR_KEY') || '').trim();
+    // 인코딩 키면 한 번 풀었다 다시 인코딩(다른 방식으로 인코딩된 경우), 디코딩 키면 인코딩하지 않은 그대로
+    let alt = raw; try { alt = /%[0-9A-Fa-f]{2}/.test(raw) ? encodeURIComponent(decodeURIComponent(raw)) : raw; } catch (e) { alt = raw; }
+    if (alt !== krxKey_()) { const r2 = UrlFetchApp.fetch(KRX_URL_ + '?serviceKey=' + alt + q, { muteHttpExceptions: true }); if (!/SERVICE_KEY_IS_NOT_REGISTERED|등록되지 않은/.test(r2.getContentText())) { r = r2; t = r2.getContentText(); } }
+  }
   let j; try { j = JSON.parse(t); } catch (e) { throw new Error('공공데이터 응답을 읽지 못함(' + r.getResponseCode() + '): ' + t.slice(0, 120)); }
   const err = j.OpenAPI_ServiceResponse && j.OpenAPI_ServiceResponse.cmmMsgHeader;
   if (err) throw new Error('공공데이터: ' + (err.returnAuthMsg || err.errMsg) + ' (서비스키·활용신청 승인 확인)');
@@ -1376,6 +1507,16 @@ function 국내주식연결확인() {
   Logger.log('이름 검색 "삼성": ' + (s.items || []).slice(0, 5).map((x) => x.name + '(' + x.sym + ')').join(', '));
 }
 
+/** 국내주식 키가 '등록되지 않은 서비스키'로 나올 때: 키 값은 찍지 않고 모양만 점검 */
+function 공공데이터키점검() {
+  const raw = String(PropertiesService.getScriptProperties().getProperty('DATA_GO_KR_KEY') || '');
+  const k = raw.trim();
+  if (!k) { Logger.log('DATA_GO_KR_KEY가 없습니다'); return; }
+  const odd = k.replace(/[A-Za-z0-9+\/=%]/g, '');
+  Logger.log('길이 ' + k.length + '자' + (raw.length !== k.length ? ' (앞뒤 공백·줄바꿈 ' + (raw.length - k.length) + '자 — 자동으로 뺌)' : '') + ' · 모양: ' + (/%[0-9A-Fa-f]{2}/.test(k) ? "'인코딩' 키(% 들어 있음)" : /[+\/=]/.test(k) ? "'디코딩' 키(+ / = 들어 있음)" : /^[0-9a-f]{64}$/i.test(k) ? '새 형식(64자 영숫자)' : '영숫자만') + (odd ? ' · ⚠️ 키에 쓰지 않는 글자 ' + odd.length + '개 섞임(복사할 때 따라온 글자일 수 있음)' : ''));
+  try { const cs = krxCandles_('005930'); Logger.log('✅ 삼성전자 일봉 ' + cs.length + '개 받음'); }
+  catch (e) { Logger.log('❌ ' + (e && e.message || e)); Logger.log('확인할 것: data.go.kr 마이페이지 → 활용신청 현황에서 "금융위원회_주식시세정보"가 승인인지, 그 화면의 "일반 인증키(Decoding)"를 그대로 DATA_GO_KR_KEY에 넣었는지'); }
+}
 /** 처음 한 번 실행: 10분마다 가격확인 트리거 만들기 */
 function 알림켜기() {
   ScriptApp.getProjectTriggers().forEach((t) => { if (t.getHandlerFunction() === '가격확인') ScriptApp.deleteTrigger(t); });
@@ -1409,7 +1550,10 @@ function 연결점검() {
   line('업비트(코인)', () => { const r = upbitRelay_('/ticker?markets=KRW-BTC'); if (!r.ok) throw new Error(r.error); return '비트코인 ' + fmt_(r.data[0].trade_price) + '원'; });
   line('바이낸스 선물(코인선물)', () => { const r = UrlFetchApp.fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT', { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) throw new Error('응답 ' + r.getResponseCode() + ' (이 서버 위치에서 막힘 → OKX로 대신 확인)'); return 'BTCUSDT ' + JSON.parse(r.getContentText()).price; });
   line('OKX 선물(코인선물 예비)', () => { const r = UrlFetchApp.fetch('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP', { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) throw new Error('응답 ' + r.getResponseCode()); return 'BTC-USDT-SWAP ' + JSON.parse(r.getContentText()).data[0].last; });
-  line('코인선물 알림용 가격(바이낸스→OKX)', () => { const p = cfutPrice_('BTCUSDT'); if (!p) throw new Error('둘 다 실패'); return String(p); });
+  line('빗썸(코인 예비)', () => { const r = bithumbGet_('/ticker?markets=KRW-BTC'); if (!r.ok) throw new Error(r.error); return '비트코인 ' + fmt_(r.data[0].trade_price) + '원'; });
+  line('바이비트 선물(예비)', () => { const p = bybitPrice_('BTCUSDT'); if (!p) throw new Error('응답 없음(이 서버 위치에서 막혔을 수 있음)'); return 'BTCUSDT ' + p; });
+  line('해외주식 선물가(OKX NVDA)', () => { const d = okx_('/market/ticker?instId=NVDA-USDT-SWAP'); return 'NVDA ' + d[0].last + ' USDT'; });
+  line('코인선물 알림용 가격(바이낸스→OKX→바이비트)', () => { const p = cfutPrice_('BTCUSDT'); if (!p) throw new Error('모두 실패'); return String(p); });
   line('Alpha Vantage(해외주식, 공개 demo 키로 IBM)', () => { const r = UrlFetchApp.fetch('https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IBM&apikey=demo', { muteHttpExceptions: true }); const j = JSON.parse(r.getContentText()); if (!j['Global Quote']) throw new Error(j.Note || j.Information || '응답 이상'); return 'IBM $' + j['Global Quote']['05. price']; });
   line('공공데이터포털 주식시세(국내주식, 키 없이)', () => { const r = UrlFetchApp.fetch(KRX_URL_ + '?serviceKey=TEST&resultType=json&numOfRows=1', { muteHttpExceptions: true }); const t = r.getContentText(); if (!/SERVICE_KEY|등록되지/.test(t)) throw new Error('응답 ' + r.getResponseCode() + ': ' + t.slice(0, 80)); return '서버에 닿음(서비스키를 넣으면 시세 받기 가능)'; });
   line('한국투자증권 서버 접속(포트 9443, 키 없이)', () => { const r = UrlFetchApp.fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', { method: 'post', contentType: 'application/json', payload: '{}', muteHttpExceptions: true }); return '응답 ' + r.getResponseCode() + ' — 서버에 닿음(키를 넣으면 토큰 발급 가능)'; });
