@@ -26,7 +26,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 10;
+const VERSION = 11;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -43,7 +43,7 @@ function doPost(e) {
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
         av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null,
-        ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_() });
+        ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_(), coinStrong: coinStrongStatus_() });
     }
     if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'av') return json_(avRelay_(d));
@@ -51,6 +51,7 @@ function doPost(e) {
     if (d.action === 'krx') return json_(krxRelay_(d));
     if (d.action === 'claude') return json_(claudeRelay_(d));
     if (d.action === 'saveScan') { P.setProperty('SCAN_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
+    if (d.action === 'saveCoinStrong') { P.setProperty('COIN_STRONG_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'saveStrong') { P.setProperty('STRONG_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'saveNq') { P.setProperty('NQ_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); if (d.enabled) P.deleteProperty('NQ_STATE'); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
@@ -79,6 +80,7 @@ function 가격확인() {
   try { nqCheck_(true); } catch (e) { Logger.log('나스닥 신호 확인 실패: ' + (e && e.message || e)); }
   try { scanDaily_(); } catch (e) { Logger.log('ETF 아침 정리 실패: ' + (e && e.message || e)); }
   try { strongCheck_(false); } catch (e) { Logger.log('강한 신호 확인 실패: ' + (e && e.message || e)); }
+  try { coinStrongCheck_(false); } catch (e) { Logger.log('코인 강한 신호 확인 실패: ' + (e && e.message || e)); }
   const items = watch_();
   if (!items.length) return;
   const P = PropertiesService.getScriptProperties();
@@ -432,13 +434,13 @@ function strongCheck_(force) {
     st = JSON.parse(P.getProperty('STRONG_STATE') || '{}');
     if (!force && st.hour === hourKey) return null;
     const today = kstDay_(Date.now()), sent = st.day === today ? (st.sent || {}) : {};
-    P.setProperty('STRONG_STATE', JSON.stringify({ hour: hourKey, day: today, sent: sent, at: now.toISOString(), last: st.last || null })); // 실패해도 이번 시간엔 다시 안 돎
+    if (!force) P.setProperty('STRONG_STATE', JSON.stringify({ hour: hourKey, day: today, sent: sent, at: now.toISOString(), last: st.last || null })); // 실패해도 이번 시간엔 다시 안 돎(점검은 상태를 안 바꿈)
     const R = strongScan_();
     const hits = R.rows.filter((x) => x.dir), fresh = hits.filter((x) => !sent[x.s + ':' + x.dir]);
     let result = { scanned: R.rows.length, hits: hits.length, fresh: fresh.length, sent: null };
-    if (fresh.length && !force) { result.sent = send_(strongText_(fresh)); fresh.forEach((x) => { sent[x.s + ':' + x.dir] = hourKey; }); }
-    P.setProperty('STRONG_STATE', JSON.stringify({ hour: hourKey, day: today, sent: sent, at: new Date().toISOString(), last: { scanned: R.rows.length, hits: hits.length, sent: result.sent ? fresh.length : 0, fail: R.fail } }));
-    result.text = fresh.length ? strongText_(fresh) : '';
+    if (fresh.length && !force) { result.sent = send_(strongText_(fresh, '⭐ 강한 신호')); fresh.forEach((x) => { sent[x.s + ':' + x.dir] = hourKey; }); }
+    if (!force) P.setProperty('STRONG_STATE', JSON.stringify({ hour: hourKey, day: today, sent: sent, at: new Date().toISOString(), last: { scanned: R.rows.length, hits: hits.length, sent: result.sent ? fresh.length : 0, fail: R.fail } }));
+    result.text = fresh.length ? strongText_(fresh, '⭐ 강한 신호') : '';
     result.fail = R.fail;
     return result;
   } finally { lock.releaseLock(); }
@@ -495,19 +497,94 @@ function strongScan_() {
   });
   return { rows: rows, fail: fail };
 }
-function strongText_(L) {
-  const f = (p) => (p >= 1000 ? p.toFixed(0) : p >= 100 ? p.toFixed(1) : p.toFixed(2)), pc = (x) => (x > 0 ? '+' : '') + x.toFixed(1) + '%';
-  const out = ['⭐ 강한 신호 (1시간봉 · 상위 4시간봉 확인 · OKX) ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d HH:mm')];
+const stFmt_ = (p) => { const a = Math.abs(p); return a >= 1000 ? p.toFixed(0) : a >= 100 ? p.toFixed(1) : a >= 1 ? p.toFixed(2) : a === 0 ? '0' : p.toFixed(Math.min(10, 3 - Math.floor(Math.log10(a)))); };
+function strongText_(L, title, names) {
+  const f = stFmt_, pc = (x) => (x > 0 ? '+' : '') + x.toFixed(1) + '%';
+  const out = [(title || '⭐ 강한 신호') + ' (1시간봉 · 상위 4시간봉 확인 · OKX) ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d HH:mm')];
   L.sort((p, q) => (p.dir === q.dir ? q.tk.vol - p.tk.vol : p.dir === 'buy' ? -1 : 1)).forEach((x) => {
-    const buy = x.dir === 'buy', name = ST_KO_[x.s] ? ' ' + ST_KO_[x.s] : x.stock ? ' 개별주' : '';
+    const buy = x.dir === 'buy', nm = names || ST_KO_, name = nm[x.s] ? ' ' + nm[x.s] : x.stock ? ' 개별주' : '';
     out.push((buy ? '🟢 강한 매수 ' : '🔴 강한 매도 ') + x.s + name + ' ' + f(x.tk.last) + ' (' + pc(x.tk.chg) + ') · ' + (buy ? '반등 ' + x.a.upScore : '하락전환 ' + x.a.dnScore) + '/5 · 확인 ' + (buy ? x.sg.nb : x.sg.ns) + '/5' + (x.calm ? '' : ' ⚠️변동성 큼'));
     if (x.z) out.push('   ' + (buy ? '매수' : '매도') + ' 검토 가격대 ' + f(x.z.low) + '~' + f(x.z.high) + ' · 무효 ' + f(x.z.stop) + ' · 1차 목표 ' + f(x.z.target));
   });
   out.push('');
-  out.push('※ 정해진 조건(기본 점수 4 이상 + 확인 5가지 중 3가지 이상)의 결과입니다(공부용). 매수·매도 추천이 아니며 자동 주문은 하지 않습니다. 같은 종목·같은 방향은 하루 한 번만 보냅니다.');
+  out.push('※ 정해진 조건(기본 점수 4 이상 + 확인 5가지 중 3가지 이상)의 결과입니다(공부용). 매수·매도 추천이 아니며 자동 주문은 하지 않습니다. 같은 종목·같은 방향은 하루 한 번만 보냅니다.' + (title && title.indexOf('코인') >= 0 ? ' 코인 선물은 변동이 커서 짧은 시간에 강제 청산될 수 있습니다.' : ''));
   return out.join('\n').slice(0, 1990);
 }
-/** 편집기에서 실행: 지금 강한 신호를 계산해 로그로만 보여 줌(보내지 않음) */
+/* ── 🪙 코인 강한 신호 디스코드 알림(코인 스캐너 앱) ──
+ * 선물 스캐너 알림과 같은 방식(매시 2분 뒤 한 번, 잠금, 같은 코인·방향 하루 한 번)이고 켜기·상태는 따로(COIN_STRONG_CFG/STATE).
+ * 대상: OKX 코인 무기한 선물(USDT) 중 안정 기준(OKX 24시간 거래 1천만 달러↑ · 등락 ±15% · 고저 폭 20% · 일봉 ATR 10% 미만)을 통과한 거래 많은 15개 + 메이저.
+ */
+const CO_CALM_ = { vol: 1e7, chg: 15, range: 20, atr: 10 }, CO_N_ = 15;
+const CO_STABLE_ = { USDC: 1, FDUSD: 1, TUSD: 1, DAI: 1, USDE: 1, USD1: 1, BUSD: 1, PYUSD: 1, RLUSD: 1, USDP: 1, USDD: 1, EURI: 1, EUR: 1, USDS: 1, PAXG: 1, XAUT: 1 };
+const CO_MAJOR_ = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB', 'DOGE'];
+const CO_KO_ = { BTC: '비트코인', ETH: '이더리움', SOL: '솔라나', XRP: '리플', BNB: 'BNB', DOGE: '도지코인', ADA: '에이다', TRX: '트론', LINK: '체인링크', AVAX: '아발란체', SUI: '수이', LTC: '라이트코인', BCH: '비트코인캐시', DOT: '폴카닷', TON: '톤코인', HYPE: '하이퍼리퀴드', PEPE: '페페', SHIB: '시바이누', XLM: '스텔라루멘', NEAR: '니어', APT: '앱토스', UNI: '유니스왑', AAVE: '에이브', ARB: '아비트럼', OP: '옵티미즘', ETC: '이더리움클래식', FIL: '파일코인', ATOM: '코스모스', WLD: '월드코인', ENA: '에테나', ONDO: '온도', TAO: '비트텐서', XMR: '모네로', ZEC: '지캐시' };
+function coinStrongStatus_() {
+  const P = PropertiesService.getScriptProperties(), cfg = JSON.parse(P.getProperty('COIN_STRONG_CFG') || '{}'), st = JSON.parse(P.getProperty('COIN_STRONG_STATE') || '{}');
+  return { enabled: !!cfg.enabled, at: st.at || null, hour: st.hour || null, sentToday: st.day === kstDay_(Date.now()) ? Object.keys(st.sent || {}).length : 0, last: st.last || null };
+}
+function coinStrongCheck_(force) {
+  const P = PropertiesService.getScriptProperties(), cfg = JSON.parse(P.getProperty('COIN_STRONG_CFG') || '{}');
+  if (!cfg.enabled && !force) return null;
+  const now = new Date(), hourKey = Utilities.formatDate(now, 'Asia/Seoul', 'yyyy-MM-dd HH'), min = Number(Utilities.formatDate(now, 'Asia/Seoul', 'm'));
+  let st = JSON.parse(P.getProperty('COIN_STRONG_STATE') || '{}');
+  if (!force && (min < ST_MIN_ || st.hour === hourKey)) return null;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return null;
+  try {
+    st = JSON.parse(P.getProperty('COIN_STRONG_STATE') || '{}');
+    if (!force && st.hour === hourKey) return null;
+    const today = kstDay_(Date.now()), sent = st.day === today ? (st.sent || {}) : {};
+    // 점검(force)은 상태를 바꾸지 않음 → 정해진 시간의 실제 알림을 막지 않음
+    if (!force) P.setProperty('COIN_STRONG_STATE', JSON.stringify({ hour: hourKey, day: today, sent: sent, at: now.toISOString(), last: st.last || null }));
+    const R = coinStrongScan_();
+    const hits = R.rows.filter((x) => x.dir), fresh = hits.filter((x) => !sent[x.s + ':' + x.dir]);
+    const text = fresh.length ? strongText_(fresh, '🪙 코인 강한 신호', CO_KO_) : '';
+    let sentR = null;
+    if (fresh.length && !force) { sentR = send_(text); fresh.forEach((x) => { sent[x.s + ':' + x.dir] = hourKey; }); }
+    if (!force) P.setProperty('COIN_STRONG_STATE', JSON.stringify({ hour: hourKey, day: today, sent: sent, at: new Date().toISOString(), last: { scanned: R.rows.length, hits: hits.length, sent: sentR ? fresh.length : 0, fail: R.fail } }));
+    return { scanned: R.rows.length, hits: hits.length, fresh: fresh.length, sent: sentR, text: text, fail: R.fail, syms: R.syms };
+  } finally { lock.releaseLock(); }
+}
+function coinStrongScan_() {
+  const cache = CacheService.getScriptCache();
+  let inst = null; try { inst = JSON.parse(cache.get('okxCat1') || 'null'); } catch (e) { inst = null; }
+  if (!inst) { inst = okx_('/public/instruments?instType=SWAP').filter((x) => x.instCategory === '1' && x.settleCcy === 'USDT' && x.state === 'live' && /-USDT-SWAP$/.test(x.instId)).map((x) => x.instId.replace(/-USDT-SWAP$/, '')).filter((c) => !CO_STABLE_[c]); cache.put('okxCat1', JSON.stringify(inst), 21600); }
+  const set = {}; inst.forEach((x) => { set[x] = 1; });
+  const tick = {};
+  okx_('/market/tickers?instType=SWAP').forEach((t) => { const c = String(t.instId).replace(/-USDT-SWAP$/, ''); if (set[c] && /-USDT-SWAP$/.test(t.instId)) tick[c] = { last: +t.last, chg: +t.open24h ? (+t.last / +t.open24h - 1) * 100 : 0, vol: +t.volCcy24h * +t.last, range: +t.low24h ? (+t.high24h / +t.low24h - 1) * 100 : 0 }; });
+  const ok = (t) => t.vol >= CO_CALM_.vol && Math.abs(t.chg) <= CO_CALM_.chg && t.range <= CO_CALM_.range;
+  const byVol = Object.keys(tick).sort((a, b) => tick[b].vol - tick[a].vol);
+  const syms = CO_MAJOR_.filter((c) => tick[c] && ok(tick[c]));
+  byVol.forEach((c) => { if (syms.length < CO_N_ + CO_MAJOR_.length && syms.indexOf(c) < 0 && ok(tick[c])) syms.push(c); });
+  const paths = [];
+  syms.forEach((c) => { const id = c + '-USDT-SWAP'; paths.push('/market/candles?instId=' + id + '&bar=1H&limit=300', '/market/candles?instId=' + id + '&bar=4H&limit=300', '/market/candles?instId=' + id + '&bar=1Dutc&limit=300'); });
+  const got = okxMany_(paths), dayStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
+  const rows = [], fail = [];
+  syms.forEach((c, i) => {
+    try {
+      const c1 = got[i * 3] ? SCAN.fromOkx(got[i * 3]) : bybitCandles_(c, '60', 3600e3);
+      const c4 = got[i * 3 + 1] ? SCAN.fromOkx(got[i * 3 + 1]) : bybitCandles_(c, '240', 4 * 3600e3);
+      const cd = got[i * 3 + 2] ? SCAN.fromOkx(got[i * 3 + 2]) : bybitCandles_(c, 'D', 86400e3);
+      if (!c1 || !c4 || !cd) { fail.push(c); return; }
+      const a = SCAN.analyze(c1, { dayStart: dayStart }), hi = SCAN.analyze(c4, { dayStart: dayStart }), d = SCAN.analyze(cd, { daily: true });
+      if (a.error) { fail.push(c); return; }
+      if (d && !d.error && d.atrPct >= CO_CALM_.atr) return; // 일봉 변동성이 너무 큼
+      const lv = LV.levels(c1, a.atr), sg = LV.strong(c1, a, hi.error ? null : hi, lv, SCAN.rsiSeries(c1.map((k) => k.c)));
+      const dir = sg.strongBuy ? 'buy' : sg.strongSell ? 'sell' : null;
+      rows.push({ s: c, stock: false, dir: dir, a: a, sg: sg, z: dir === 'buy' ? LV.buyZone(lv, a) : dir === 'sell' ? LV.sellZone(lv, a) : null, tk: tick[c], calm: true });
+    } catch (e) { fail.push(c); }
+  });
+  return { rows: rows, fail: fail, syms: syms };
+}
+/** 편집기에서 실행: 지금 코인 강한 신호를 계산해 로그로만 보여 줌(보내지도, 상태를 바꾸지도 않음) */
+function 코인강한신호점검() {
+  const r = coinStrongCheck_(true);
+  Logger.log('대상 ' + r.syms.length + '개(' + r.syms.join(',') + ') · 계산 ' + r.scanned + '개 · 강한 신호 ' + r.hits + '개 · 오늘 아직 안 보낸 것 ' + r.fresh + '개 · 봉 못 받은 코인 ' + (r.fail.join(', ') || '없음'));
+  Logger.log(r.text || '(보낼 새 신호 없음)');
+  Logger.log('코인 강한 신호 알림 설정: ' + (coinStrongStatus_().enabled ? '켜짐' : '꺼짐(코인 스캐너 앱 🧮 청산가 화면 아래에서 켜기)'));
+}
+
+/** 편집기에서 실행: 지금 강한 신호를 계산해 로그로만 보여 줌(보내지도, 상태를 바꾸지도 않음) */
 function 강한신호점검() {
   const r = strongCheck_(true);
   Logger.log('계산 ' + r.scanned + '종목 · 강한 신호 ' + r.hits + '개 · 오늘 아직 안 보낸 것 ' + r.fresh + '개 · 봉 못 받은 종목 ' + (r.fail.join(', ') || '없음'));
