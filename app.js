@@ -1,4 +1,4 @@
-/* 가격 위치 — 국내주식·해외주식·코인·코인선물·해외선물 매수 검토 구간 공부용 앱
+/* AI 마켓 스캐너(옛 이름 가격 위치) — 국내주식·해외주식·코인·코인선물·해외선물 매수 검토 구간 공부용 앱
  * - 시세 출처: sources.js (모두 '조회'만, 주문·계좌 기능 없음)
  * - 구간 계산: zones.js (앱 안에서 계산)
  * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 현재가를 보고 구간에 들어오면 텔레그램·디스코드로 알림.
@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -141,7 +141,7 @@ $('#backBtn').addEventListener('click', () => (history.length > 1 ? history.back
 /* ───────── 관심 종목 목록(카테고리별) ───────── */
 const catChips = (sel, withAll) => `<div class="chips" role="tablist">${withAll ? `<button class="chip${sel === 'all' ? ' on' : ''}" data-cat="all" type="button">전체</button>` : ''}${Object.entries(CATS).map(([k, c]) => `<button class="chip${sel === k ? ' on' : ''}" data-cat="${k}" type="button">${c.icon} ${c.label}</button>`).join('')}</div>`;
 async function viewList() {
-  setTitle('가격 위치');
+  setTitle('AI 마켓 스캐너');
   const watch = await getWatch();
   let sel = sessionStorage.getItem('pzCat') || 'all';
   const draw = async () => {
@@ -243,7 +243,7 @@ async function viewAsset(cat, sym) {
       <div class="muted" style="font-size:11px;margin-top:4px">빨강 상승·파랑 하락 봉 · 선: <span style="color:#E8A317">60</span>/<span style="color:#8E5CF0">120</span>/<span style="color:#1F9D63">200</span>봉 평균 · 칠한 띠: 검토 구간(진할수록 근거 많음)</div></div>
     <div id="sum" class="card"><div class="muted">계산 중…</div></div>
     <div id="zs"></div>
-    ${AI_SUPPORTED.includes(cat) ? `<a class="card coin" href="#/ai/${cat}/${enc(sym)}" style="display:block"><div class="row spread"><b>🤖 AI 전문가 팀 분석</b><span>›</span></div><div class="muted" style="font-size:13px;margin-top:4px">분석가 4명·토론·위험 관리 → 5단계 등급 + 공부 정리 (AI 의견·공부용)</div></a>` : ''}
+    ${`<a class="card coin" href="#/ai/${cat}/${enc(sym)}" style="display:block"><div class="row spread"><b>🤖 AI 분석</b><span>›</span></div><div class="muted" style="font-size:13px;margin-top:4px">📐 규칙 분석(키 없이 바로) · 📋 Claude·ChatGPT에 붙여 넣을 요청문 복사${cat === 'us' ? ' · 🤖 Claude 자동 분석(키 있을 때)' : ''} — 공부용</div></a>`}
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
@@ -366,7 +366,7 @@ async function viewSettings() {
       <li>구간과 알림은 공부용입니다. 매수 추천이 아니며 결정과 책임은 본인에게 있습니다.</li>
       <li>Alpha Vantage 무료 키는 하루 25번 정도만 부를 수 있어, 해외주식은 6시간마다 새로 받고 알림은 3시간마다 확인합니다.</li>
       <li>관심 종목과 설정은 이 폰에만 저장됩니다.</li></ul></div>
-    <div class="card"><h2>앱 정보</h2><div class="muted">가격 위치 v${APP_VERSION}<br>폰 홈 화면에 추가: 크롬 ⋮ → '홈 화면에 추가' 또는 '앱 설치'</div></div>`;
+    <div class="card"><h2>앱 정보</h2><div class="muted">AI 마켓 스캐너 v${APP_VERSION} (옛 이름: 가격 위치)<br>폰 홈 화면에 추가: 크롬 ⋮ → '홈 화면에 추가' 또는 '앱 설치'</div></div>`;
   const res = (html) => { $('#r_res').innerHTML = html; };
   $('#r_save').onclick = async () => {
     const url = $('#r_url').value.trim(), key = $('#r_key').value.trim();

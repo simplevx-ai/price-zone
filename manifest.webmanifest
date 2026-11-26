@@ -1,7 +1,7 @@
 {
   "id": "./?app=price-zone",
-  "name": "가격 위치",
-  "short_name": "가격 위치",
+  "name": "AI 마켓 스캐너",
+  "short_name": "AI 마켓 스캐너",
   "description": "국내·해외주식·코인·선물 매수 검토 구간 공부용 — 지지선·매물대·이동평균 등 근거가 겹치는 가격대와 텔레그램 알림",
   "lang": "ko",
   "start_url": "./",
@@ -10,8 +10,8 @@
   "background_color": "#0B1F4B",
   "theme_color": "#0B1F4B",
   "icons": [
-    { "src": "icons/icon-192.png?v=1", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png?v=1", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-maskable-512.png?v=1", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    { "src": "icons/icon-192.png?v=2", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png?v=2", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png?v=2", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

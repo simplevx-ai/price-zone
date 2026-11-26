@@ -1,4 +1,4 @@
-/* 가격 위치 — 📊 ETF 선물 스캐너 화면 (OKX·바이낸스 공개 시세, 자동 주문 없음) */
+/* AI 마켓 스캐너 — 📊 ETF 선물 스캐너 화면 (OKX·바이낸스 공개 시세, 자동 주문 없음) */
 'use strict';
 
 const SC_TF = { '15m': { okx: '15m', bn: '15m', label: '15분봉', ttl: 2 * 60e3 }, '1H': { okx: '1H', bn: '1h', label: '1시간봉', ttl: 5 * 60e3 }, '4H': { okx: '4H', bn: '4h', label: '4시간봉', ttl: 10 * 60e3 }, '1D': { okx: '1Dutc', bn: '1d', label: '일봉', ttl: 30 * 60e3 } };

@@ -1,4 +1,4 @@
-/* 가격 위치 — 🤖 AI 분석 (전문가 팀 토론 → 등급 + 공부 정리)
+/* AI 마켓 스캐너 — 🤖 AI 분석 (전문가 팀 토론 → 등급 + 공부 정리)
  *
  * 흐름과 프롬프트는 TradingAgents v0.7.1(Tauric Research, https://github.com/TauricResearch/TradingAgents)을
  * 바탕으로 한국어·이 앱의 데이터에 맞게 고쳐 썼습니다. 원본 라이선스: Apache License 2.0
@@ -327,12 +327,15 @@ async function aiStatusMsg() {
 async function viewAiHome() {
   setTitle('🤖 AI 분석');
   const [watch, idx, msg, st] = [await getWatch(), await AIStore.index(), await aiStatusMsg(), await KV.get('relayStatus', {})];
-  const ok = watch.filter((w) => AI_SUPPORTED.includes(w.cat)), later = watch.filter((w) => !AI_SUPPORTED.includes(w.cat));
+  const ok = watch, later = [];
   const today = st.aiToday && st.aiToday.day ? `오늘 ${st.aiToday.calls}번 사용 / 한도 ${st.aiCap || 130}번 (설정에서 연결 확인 때 갱신)` : '';
   view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">${AI_DISC}</div>
     <div class="card"><h2>전문가 팀이 분석하는 방식</h2>
+      <ol class="steps" style="font-size:13px"><li><b>📐 규칙 분석</b> — 키 없이 바로·무료. 분석가 5명이 정해진 규칙으로 점수를 매겨 5단계 등급(모든 종목)</li>
+      <li><b>📋 요청문 복사</b> — 데이터가 담긴 분석 요청문을 복사해 Claude 앱·ChatGPT에 붙여 넣기(지금 쓰는 구독으로, 키 필요 없음)</li>
+      <li><b>🤖 Claude 자동 분석</b> — Claude API 키가 스크립트에 있을 때만(해외주식). 아래 설명</li></ol>
       <div class="muted" style="font-size:13px">분석가 4명(차트·여론·뉴스·재무) → 강세·약세 토론 → 평가자 → 트레이더 → 위험 분석가 3명 → 포트폴리오 매니저가 <b>5단계 등급</b>을 냅니다. 마지막에 <b>공부 정리</b>(근거 비교·용어 풀이·판단이 바뀔 조건)를 붙입니다. 종목 1개에 Claude를 13번 부르고 3~6분, 약 1달러 안팎(추정)이 듭니다.</div>
-      ${msg ? `<div class="warnlist">🔑 ${esc(msg)}. <a href="#/settings">설정 ›</a></div>` : ''}
+      ${msg ? `<div class="muted" style="font-size:12px;margin-top:6px">🔑 Claude 자동 분석: ${esc(msg)} (규칙 분석·요청문 복사는 그대로 쓸 수 있음)</div>` : ''}
       ${today ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(today)}</div>` : ''}</div>
     <div class="card"><h2>분석할 종목</h2>
       ${ok.length ? ok.map((w) => `<a class="coin" href="#/ai/${w.cat}/${enc(w.sym)}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.sym)}</span></span><span>›</span></div></a>`).join('') : '<div class="muted">관심 종목에 해외주식이 없습니다. <a href="#/add">종목 추가 ›</a></div>'}
@@ -347,21 +350,24 @@ async function viewAiAsset(cat, sym) {
   const watch = await getWatch();
   const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym };
   setTitle(`🤖 ${w.name}`, true);
-  if (!AI_SUPPORTED.includes(cat)) { view().innerHTML = `<div class="card warnlist" style="margin-top:0">${esc(CATS[cat] ? CATS[cat].label : cat)}은(는) 다음 단계에서 지원합니다. 지금은 해외주식만 됩니다.</div>`; return; }
+  // 규칙 분석·요청문 복사는 모든 카테고리, Claude 자동 분석(키 필요)은 해외주식만
+  const claudeOk = AI_SUPPORTED.includes(cat);
   const idx = (await AIStore.index()).filter((x) => x.cat === cat && x.sym === sym);
   const running = idx.find((x) => x.status === 'running' && AIRun.active.has(x.id));
   if (running) { location.hash = `#/air/${enc(running.id)}`; return; }
-  const msg = await aiStatusMsg();
+  const msg = claudeOk ? await aiStatusMsg() : '';
   view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">${AI_DISC}</div>
-    <div class="card"><h2>${esc(w.name)} <span class="muted">${esc(sym)}</span> 분석하기</h2>
+    <div id="freeAi"></div>
+    ${claudeOk ? `<div class="card"><h2>🤖 Claude 전문가 팀 자동 분석 <span class="muted">(Claude API 키가 있을 때)</span></h2>
       <ul class="steps" style="font-size:13px"><li>데이터: 일봉·지표(앱이 계산), 회사 개요·재무, 최근 뉴스 40건과 감성 점수 (Alpha Vantage 2번 사용)</li>
       <li>Claude(claude-opus-5-5)를 13번 부릅니다. 3~6분 걸리고 <b>약 1달러 안팎</b>(추정)이 듭니다.</li>
       <li>도는 동안 화면을 켜 두세요. 중간에 멈추면 '이어서 하기'로 남은 단계만 다시 합니다.</li></ul>
-      ${msg ? `<div class="warnlist">🔑 ${esc(msg)}. <a href="#/settings">설정 ›</a></div>` : ''}
+      ${msg ? `<div class="muted" style="font-size:13px;margin-top:6px">🔑 ${esc(msg)} — 키 없이 쓰려면 위의 <b>규칙 분석</b>이나 <b>요청문 복사</b>를 쓰세요.</div>` : ''}
       <button class="btn primary block" id="go" type="button" style="margin-top:10px" ${msg ? 'disabled' : ''}>🤖 분석 시작</button>
-      <div id="gomsg" class="muted" style="font-size:13px;margin-top:6px"></div></div>
+      <div id="gomsg" class="muted" style="font-size:13px;margin-top:6px"></div></div>` : ''}
     ${idx.length ? `<div class="card"><h2>이 종목 지난 분석</h2>${idx.map((x) => `<a class="coin" href="#/air/${enc(x.id)}"><div class="row spread"><span>${new Date(x.at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} <span class="muted" style="font-size:12px">기준일 ${esc(x.asOf || '-')}</span></span>${x.status === 'done' ? ratingBadge(x.rating) : '<span class="muted" style="font-size:12px">멈춤</span>'}</div></a>`).join('')}</div>` : ''}`;
-  $('#go').onclick = async () => {
+  renderFreeAi($('#freeAi'), w);
+  if ($('#go')) $('#go').onclick = async () => {
     if (!confirm(`${w.name} 분석을 시작할까요?\nClaude를 13번 불러 약 1달러 안팎(추정)이 듭니다.`)) return;
     $('#go').disabled = true; $('#gomsg').textContent = '데이터 모으는 중…';
     try {

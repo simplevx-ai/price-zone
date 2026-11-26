@@ -1,4 +1,4 @@
-/* 가격 위치 — 📡 나스닥 신호 화면 (OKX QQQ·TQQQ·SQQQ 무기한 선물 공개 시세, 자동 주문 없음) */
+/* AI 마켓 스캐너 — 📡 나스닥 신호 화면 (OKX QQQ·TQQQ·SQQQ 무기한 선물 공개 시세, 자동 주문 없음) */
 'use strict';
 
 const NQ_OKX = 'https://www.okx.com/api/v5';
