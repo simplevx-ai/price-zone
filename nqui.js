@@ -114,6 +114,15 @@ async function viewNq() {
     try { await relay('saveNq', { enabled: e.target.checked }); await KV.set('nqAlert', { enabled: e.target.checked }); toast(e.target.checked ? '나스닥 신호 알림을 켰습니다' : '나스닥 신호 알림을 껐습니다'); }
     catch (err) { e.target.checked = !e.target.checked; alert('저장 실패: ' + err.message); }
   };
+  // 스크립트의 실제 알림 상태로 스위치 맞추기(다른 기기나 스크립트 쪽에서 켜고 끈 경우)
+  if (await relayOn()) {
+    relay('ping').then(async (d) => {
+      if (!d.nq) return;
+      const cb = $('#nqAl'); if (cb) cb.checked = !!d.nq.enabled;
+      await KV.set('nqAlert', { enabled: !!d.nq.enabled });
+      const st = await KV.get('relayStatus', {}); st.nq = d.nq; st.version = d.version; await KV.set('relayStatus', st);
+    }).catch(() => {});
+  }
 }
 
 function nqCanvas(cv) { const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight; cv.width = w * dpr; cv.height = h * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr); return { g, w, h, css: getComputedStyle(document.documentElement) }; }

@@ -1,5 +1,5 @@
 // 앱 화면 파일을 폰에 저장해 인터넷 없이도 열리게 한다. (시세는 항상 업비트에서 새로 받음)
-const CACHE = 'pricezone-v2.4.0';
+const CACHE = 'pricezone-v2.4.1';
 const FILES = ['./', 'index.html', 'style.css', 'zones.js', 'sources.js', 'nq.js', 'nqui.js', 'ai.js', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
 self.addEventListener('install', (e) => {
