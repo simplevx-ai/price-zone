@@ -129,7 +129,7 @@ async function scAlertCard() {
     try { await relay('saveScan', { enabled: e.target.checked }); await KV.set('scAlert', { enabled: e.target.checked }); toast(e.target.checked ? '아침 정리를 켰습니다' : '아침 정리를 껐습니다'); }
     catch (err) { e.target.checked = !e.target.checked; alert('저장 실패: ' + err.message); }
   };
-  if (await relayOn()) relay('ping').then(async (d) => { if (!d.scan) return; const cb = $('#scAl'); if (cb) cb.checked = !!d.scan.enabled; await KV.set('scAlert', { enabled: !!d.scan.enabled }); }).catch(() => {});
+  if (await relayOn()) relay('ping').then(async (d) => { const st = await KV.get('relayStatus', {}); st.version = d.version; st.scan = d.scan || null; st.nq = d.nq || st.nq; await KV.set('relayStatus', st); if ((d.version || 0) >= 9) el.querySelectorAll('.warnlist').forEach((w) => w.remove()); if (!d.scan) return; const cb = $('#scAl'); if (cb) cb.checked = !!d.scan.enabled; await KV.set('scAlert', { enabled: !!d.scan.enabled }); }).catch(() => {});
 }
 // 📡 화면 위쪽 전환 버튼(스캐너 ↔ QQQ 규칙 신호)
 function nqSwitch(on) {

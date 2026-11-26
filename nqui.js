@@ -119,6 +119,7 @@ async function viewNq() {
     relay('ping').then(async (d) => {
       if (!d.nq) return;
       const cb = $('#nqAl'); if (cb) cb.checked = !!d.nq.enabled;
+      if ((d.version || 0) >= 8 && cb) cb.closest('.card').querySelectorAll('.warnlist').forEach((w) => w.remove());
       await KV.set('nqAlert', { enabled: !!d.nq.enabled });
       const st = await KV.get('relayStatus', {}); st.nq = d.nq; st.version = d.version; await KV.set('relayStatus', st);
     }).catch(() => {});
