@@ -218,3 +218,13 @@ dl.terms { margin: 4px 0 0; font-size: 14px; } dl.terms dt { font-weight: 700; m
 .grid3 .stat { padding: 10px 8px; } .grid3 .stat b { font-size: 18px; }
 ul.checks { list-style: none; padding: 0; margin: 6px 0; font-size: 14px; } ul.checks li { margin: 3px 0; }
 .tabs a { font-size: 11px; white-space: nowrap; }
+
+/* 📊 ETF 스캐너 */
+.scchip { display: inline-block; font-size: 11px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; color: var(--muted); white-space: nowrap; }
+.scchip.s4 { background: #FFE3E3; color: #9B1C1C; border-color: #F3B0B0; } .scchip.s3 { background: #FFF1D6; color: #7A4A00; border-color: #F1D08A; }
+.scchip.tup { color: #C0392B; } .scchip.tdn { color: #1F5FD1; }
+@media (prefers-color-scheme: dark) { .scchip.s4 { background: #4A1C1C; color: #FFC2C2; border-color: #7A2E2E; } .scchip.s3 { background: #3F3112; color: #FFE3A3; border-color: #6B5320; } }
+.levtag { font-size: 10px; border-radius: 6px; padding: 0 5px; background: var(--navy); color: #fff; } .levtag.inv { background: #7A3DB8; }
+.scrow { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-bottom: 6px; }
+.scrow summary { list-style: none; cursor: pointer; } .scrow summary::-webkit-details-marker { display: none; }
+a.chip { text-decoration: none; }

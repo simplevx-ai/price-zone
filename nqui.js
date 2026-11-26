@@ -39,7 +39,7 @@ const n2 = (x, d = 2) => (x == null || !Number.isFinite(x) ? '-' : Number(x).toF
 const chg = (cs, k) => (cs.length > k ? ((cs[cs.length - 1].c / cs[cs.length - 1 - k].c) - 1) * 100 : null);
 
 async function viewNq() {
-  setTitle('📡 나스닥 신호');
+  setTitle('🔔 QQQ 규칙 신호');
   view().innerHTML = '<div class="card"><div class="muted">OKX 시세를 받는 중… (처음엔 10초쯤)</div></div>';
   let D;
   try { D = await nqLoad(); } catch (e) { view().innerHTML = `<div class="card errbox">${esc(e.message)}</div>`; return; }
@@ -84,7 +84,7 @@ async function viewNq() {
     ${rs.checkedAt && (rs.version || 0) < 8 ? '<div class="warnlist">스크립트를 새 버전(v8)으로 바꿔야 알림이 동작합니다</div>' : ''}
     ${rs.nq && rs.nq.enabled ? `<div class="muted" style="font-size:12px;margin-top:4px">스크립트 상태: 켜짐${rs.nq.regime ? ' · 장세 ' + (NQ_STATE_KO[rs.nq.regime] || {}).t : ''}${rs.nq.at ? ' · 마지막 확인 ' + nqTime(rs.nq.at) : ''}</div>` : ''}</div>`;
 
-  view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">📘 정해진 규칙이 낸 신호입니다. 매수·매도 추천이 아니며 <b>자동 주문은 하지 않습니다</b>. TQQQ·SQQQ는 3배 레버리지 상품이고 선물은 손실이 원금보다 커질 수 있습니다.</div>
+  view().innerHTML = `${nqSwitch('nq')}<div class="card warnlist" style="margin-top:0;font-size:13px">📘 정해진 규칙이 낸 신호입니다. 매수·매도 추천이 아니며 <b>자동 주문은 하지 않습니다</b>. TQQQ·SQQQ는 3배 레버리지 상품이고 선물은 손실이 원금보다 커질 수 있습니다.</div>
     <div class="card"><div class="row spread"><h2 style="margin:0">지금 장세 <span class="muted">(QQQ 일봉)</span></h2>${st ? `<b style="color:${st.c};font-size:18px">${st.i} ${st.t}</b>` : '<span class="muted">계산 못 함</span>'}</div>
       ${R ? `<div class="muted" style="font-size:12px;margin:4px 0 6px">점수 ${R.score > 0 ? '+' : ''}${R.score} (−5~+5, +3 이상 상승장 → TQQQ 쪽만, −3 이하 하락장 → SQQQ 쪽만, 그 사이 관망) · ${new Date(R.t).toLocaleDateString('ko-KR')} 마감 기준</div>
       <ul class="checks">${R.checks.map((c) => `<li>${c.ok ? '✅' : '❌'} ${esc(c.name)} <span class="muted">(${n2(c.val, c.key === 'macd' ? 3 : 2)})</span></li>`).join('')}</ul>` : ''}
