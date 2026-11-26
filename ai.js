@@ -11,7 +11,19 @@
 'use strict';
 
 const AI_PRICE = { in: 4, out: 20 }; // claude-opus-5-5, 백만 토큰당 달러(2026-11 기준)
-const AI_SUPPORTED = ['us'];          // 1단계: 해외주식만
+const AI_SUPPORTED = ['us'];
+// AI 분석 섹터별 종목(관심 종목에 없어도 바로 분석) — 규칙 분석·요청문 복사는 모두, Claude 자동 분석은 해외주식만
+const AI_SECTORS = {
+  mine: { label: '⭐ 내 관심 종목', items: [] },
+  coin: { label: '🪙 코인 메이저', items: [['KRW-BTC', '비트코인'], ['KRW-ETH', '이더리움'], ['KRW-XRP', '리플'], ['KRW-SOL', '솔라나'], ['KRW-DOGE', '도지코인'], ['KRW-USDT', '테더']].map(([sym, name]) => ({ cat: 'coin', sym, name })) },
+  cfut: { label: '⚡ 코인 선물', items: [['BTCUSDT', '비트코인 선물'], ['ETHUSDT', '이더리움 선물'], ['SOLUSDT', '솔라나 선물'], ['XRPUSDT', '리플 선물']].map(([sym, name]) => ({ cat: 'cfut', sym, name })) },
+  nqf: { label: '📈 나스닥·지수 선물', items: [['QQQUSDT', '나스닥 선물(QQQ 무기한)'], ['SPYUSDT', 'S&P500 선물(SPY 무기한)'], ['TQQQUSDT', '나스닥 3배(TQQQ 무기한)'], ['SQQQUSDT', '나스닥 인버스 3배(SQQQ 무기한)'], ['SOXLUSDT', '반도체 3배(SOXL 무기한)']].map(([sym, name]) => ({ cat: 'cfut', sym, name })), note: '거래소(바이낸스) 무기한 선물 가격이며 미국 상장 ETF 가격이 아닙니다(24시간 거래).' },
+  bigtech: { label: '💻 미국 빅테크', items: [['AAPL', '애플'], ['MSFT', '마이크로소프트'], ['GOOGL', '알파벳(구글)'], ['AMZN', '아마존'], ['META', '메타'], ['NVDA', '엔비디아'], ['TSLA', '테슬라']].map(([sym, name]) => ({ cat: 'us', sym, name })), note: '해외주식은 Alpha Vantage(무료 하루 25회) 시세를 쓰고, 한도에 걸리면 같은 종목 선물 시세로 대신합니다.' },
+  semi: { label: '🔌 미국 반도체', items: [['NVDA', '엔비디아'], ['AMD', 'AMD'], ['AVGO', '브로드컴'], ['TSM', 'TSMC'], ['MU', '마이크론'], ['INTC', '인텔']].map(([sym, name]) => ({ cat: 'us', sym, name })) },
+  usetf: { label: '🇺🇸 미국 지수 ETF', items: [['QQQ', 'QQQ 나스닥100'], ['SPY', 'SPY S&P500'], ['TQQQ', 'TQQQ 나스닥100 3배'], ['SOXL', 'SOXL 반도체 3배']].map(([sym, name]) => ({ cat: 'us', sym, name })) },
+  kr: { label: '🇰🇷 국내 대형주', items: [['005930', '삼성전자'], ['000660', 'SK하이닉스'], ['373220', 'LG에너지솔루션'], ['005380', '현대차'], ['035420', 'NAVER']].map(([sym, name]) => ({ cat: 'kr', sym, name })), note: '국내주식은 공공데이터포털 서비스키(또는 한국투자증권 키)가 연결돼야 시세가 나옵니다.' },
+};
+const aiNameOf = (cat, sym) => { for (const v of Object.values(AI_SECTORS)) { const x = v.items.find((i) => i.cat === cat && i.sym === sym); if (x) return x.name; } return sym; };          // 1단계: 해외주식만
 const RATINGS = {
   Buy: { ko: '매수', cls: 'r-buy', desc: '강한 확신으로 사거나 늘림' },
   Overweight: { ko: '비중 확대', cls: 'r-ow', desc: '우호적, 서서히 늘림' },
@@ -337,18 +349,28 @@ async function viewAiHome() {
       <div class="muted" style="font-size:13px">분석가 4명(차트·여론·뉴스·재무) → 강세·약세 토론 → 평가자 → 트레이더 → 위험 분석가 3명 → 포트폴리오 매니저가 <b>5단계 등급</b>을 냅니다. 마지막에 <b>공부 정리</b>(근거 비교·용어 풀이·판단이 바뀔 조건)를 붙입니다. 종목 1개에 Claude를 13번 부르고 3~6분, 약 1달러 안팎(추정)이 듭니다.</div>
       ${msg ? `<div class="muted" style="font-size:12px;margin-top:6px">🔑 Claude 자동 분석: ${esc(msg)} (규칙 분석·요청문 복사는 그대로 쓸 수 있음)</div>` : ''}
       ${today ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(today)}</div>` : ''}</div>
-    <div class="card"><h2>분석할 종목</h2>
-      ${ok.length ? ok.map((w) => `<a class="coin" href="#/ai/${w.cat}/${enc(w.sym)}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.sym)}</span></span><span>›</span></div></a>`).join('') : '<div class="muted">관심 종목에 해외주식이 없습니다. <a href="#/add">종목 추가 ›</a></div>'}
-      ${later.length ? `<div class="muted" style="font-size:12px;margin-top:8px">국내주식·코인·선물은 다음 단계에서 지원합니다 (${later.length}종목).</div>` : ''}</div>
+    <div class="card"><h2>분석할 종목 <span class="muted">(섹터별)</span></h2>
+      <div class="chips" id="aiSec">${Object.entries(AI_SECTORS).map(([k, v]) => `<button class="chip" type="button" data-sec="${k}">${v.label}</button>`).join('')}</div>
+      <div id="aiSecList"></div></div>
     <div class="card"><h2>지난 분석 <span class="muted">(${idx.length})</span></h2>
       ${idx.length ? idx.map((x) => `<a class="coin" href="#/air/${enc(x.id)}"><div class="row spread"><span class="nm">${esc(x.name)} <span class="muted" style="font-size:12px">${esc(x.sym)}</span></span>${x.status === 'done' ? ratingBadge(x.rating) : `<span class="muted" style="font-size:12px">${x.status === 'running' ? '진행 중' : '멈춤'}</span>`}</div><div class="row spread muted" style="font-size:12px;margin-top:4px"><span>${new Date(x.at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · 기준일 ${esc(x.asOf || '-')}</span><span>$${(x.cost || 0).toFixed(2)}</span></div></a>`).join('') : '<div class="muted">아직 없습니다.</div>'}</div>
     <div class="disc">흐름·프롬프트: TradingAgents(Tauric Research, Apache-2.0)를 바탕으로 고쳐 씀 · 모델 claude-opus-5-5</div>`;
+  const draw = async (k) => {
+    await KV.set('aiSec', k);
+    view().querySelectorAll('[data-sec]').forEach((b) => b.classList.toggle('on', b.dataset.sec === k));
+    const L = k === 'mine' ? watch : AI_SECTORS[k].items;
+    $('#aiSecList').innerHTML = (L.length ? L.map((w) => `<a class="coin" href="#/ai/${w.cat}/${enc(w.sym)}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span></span><span>›</span></div></a>`).join('') : '<div class="muted">관심 종목이 없습니다. <a href="#/add">종목 추가 ›</a></div>')
+      + (AI_SECTORS[k].note ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(AI_SECTORS[k].note)}</div>` : '');
+  };
+  view().querySelectorAll('[data-sec]').forEach((b) => { b.onclick = () => draw(b.dataset.sec); });
+  const last = await KV.get('aiSec', 'mine');
+  draw(AI_SECTORS[last] ? last : 'mine');
 }
 
 /* ───────── 화면: 종목별 시작 ───────── */
 async function viewAiAsset(cat, sym) {
   const watch = await getWatch();
-  const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym };
+  const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: aiNameOf(cat, sym) };
   setTitle(`🤖 ${w.name}`, true);
   // 규칙 분석·요청문 복사는 모든 카테고리, Claude 자동 분석(키 필요)은 해외주식만
   const claudeOk = AI_SUPPORTED.includes(cat);

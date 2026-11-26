@@ -7,12 +7,17 @@
  */
 'use strict';
 
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '3.0.0';
+// 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
-  { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
-  { cat: 'cfut', sym: 'BTCUSDT', name: 'BTC 무기한', tf: 'day' },
+  { cat: 'cfut', sym: 'BTCUSDT', name: '비트코인 선물', tf: 'day' },
+  { cat: 'cfut', sym: 'QQQUSDT', name: '나스닥 선물(QQQ 무기한)', tf: 'day' },
+  { cat: 'coin', sym: 'KRW-USDT', name: '테더', tf: 'day' },
 ];
+// 24시간 거래대금이 이보다 적으면 관심 종목에서 자동으로 뺌(기본 4종목은 빼지 않음)
+const LOW_VOL = { coin: 1e9, cfut: 1e6 }; // 코인 10억 원, 코인선물 100만 USDT
+const LOW_VOL_TXT = { coin: '하루 거래 10억 원 미만', cfut: '하루 거래 100만 USDT 미만' };
 
 /* ───────── 저장(IndexedDB 키-값) ───────── */
 const KV = (() => {
@@ -42,6 +47,12 @@ function busy(msg) { let b = $('#busy'); if (!b) { b = document.createElement('d
 async function getWatch() {
   const w = await KV.get('watch', null);
   if (!w) return DEFAULT_WATCH.map((x) => ({ ...x }));
+  if (!(await KV.get('watchV3', false))) { // v3.0.0: 기본 4종목이 없으면 맨 앞에 한 번 넣음
+    const have = new Set(w.map((x) => (x.cat ? `${x.cat}:${x.sym}` : `coin:${x.market}`)));
+    const add = DEFAULT_WATCH.filter((d) => !have.has(`${d.cat}:${d.sym}`)).map((d) => ({ ...d }));
+    await KV.set('watch', add.concat(w)); await KV.set('watchV3', true);
+    return getWatch();
+  }
   const out = w.map((x) => (x.cat ? x : { cat: 'coin', sym: x.market, name: x.name, tf: x.tf || 'day', alert: x.alert }));
   // 같은 종목이 두 번 들어가 있으면 하나만(알림 켠 쪽을 남김)
   const m = new Map();
@@ -151,13 +162,15 @@ async function viewList() {
       ${catChips(sel, true)}
       <div id="ls">${L.map((w) => `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
       <a class="btn block" href="#/add">+ 종목 추가</a>
+      ${(await KV.get('lowVolGone', [])).length ? `<details class="card" style="margin-top:10px"><summary class="muted" style="font-size:13px">거래가 적어 자동으로 뺀 종목</summary><div class="muted" style="font-size:12px;margin-top:4px">${(await KV.get('lowVolGone', [])).slice(0, 10).map((x) => `${esc(x.name)}(${esc(x.why)}, ${new Date(x.at).toLocaleDateString('ko-KR')})`).join(' · ')}</div></details>` : ''}
+      <div class="muted" style="font-size:11px;margin-top:6px">코인은 하루 거래 10억 원, 코인선물은 100만 USDT보다 적으면 관심 종목에서 자동으로 뺍니다(비트코인·비트코인 선물·나스닥 선물·테더는 제외).</div>
       <div class="disc">시세: 업비트·빗썸·바이낸스·OKX·바이비트(공개) · Alpha Vantage · 공공데이터포털 · 한국투자증권 · v${APP_VERSION}</div>`;
     view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { sel = b.dataset.cat; sessionStorage.setItem('pzCat', sel); draw(); }; });
     // 현재가(코인·코인선물은 바로, 나머지는 캔들 마지막 값)
     const q = {};
     const showPx = (w, price, chg) => { const el = view().querySelector(`[data-id="${CSS.escape(idOf(w))}"] .px`); if (!el) return; el.className = 'px ' + (chg > 0 ? 'up' : chg < 0 ? 'down' : ''); el.innerHTML = `<b>${fmtP(price, w.cat)}</b> ${pct(chg)}`; };
     // 현재가는 기다리지 않고 따로 채운다(업비트 직접 받기가 10초씩 걸려도 다른 종목은 먼저 보이게)
-    quotes(L).then((res) => { Object.assign(q, res); for (const w of L) { const qq = q[idOf(w)]; if (qq) showPx(w, qq.price, qq.chg); } }).catch(() => {});
+    quotes(L).then((res) => { Object.assign(q, res); for (const w of L) { const qq = q[idOf(w)]; if (qq) showPx(w, qq.price, qq.chg); } cleanLowVol(res).catch(() => {}); }).catch(() => {});
     // 구간 요약(출처가 다르면 동시에 — 업비트 직접 받기만 안에서 차례로)
     await Promise.all(L.map(async (w) => {
       const el = view().querySelector(`[data-id="${CSS.escape(idOf(w))}"]`); if (!el) return;
@@ -179,6 +192,18 @@ async function viewList() {
   if ((await relayOn()) && watch.some((w) => w.alert) && (!last || Date.now() - Date.parse(last) > 6 * 3600e3)) syncAlerts(true).catch(() => {});
 }
 
+// 24시간 거래대금이 기준보다 적은 코인·코인선물은 관심 종목에서 자동으로 뺌(시세를 제대로 받은 경우만, 기본 4종목 제외)
+async function cleanLowVol(q) {
+  const ws = await getWatch(), isDef = (w) => DEFAULT_WATCH.some((d) => d.cat === w.cat && d.sym === w.sym);
+  const gone = ws.filter((w) => LOW_VOL[w.cat] && !isDef(w) && q[idOf(w)] && Number.isFinite(q[idOf(w)].vol) && q[idOf(w)].vol < LOW_VOL[w.cat]);
+  if (!gone.length) return;
+  await setWatch(ws.filter((w) => !gone.includes(w)));
+  const log = await KV.get('lowVolGone', []); gone.forEach((w) => log.unshift({ at: nowISO(), name: w.name, sym: w.sym, cat: w.cat, why: LOW_VOL_TXT[w.cat] })); await KV.set('lowVolGone', log.slice(0, 30));
+  toast(`거래가 너무 적어 관심 종목에서 뺐습니다: ${gone.map((w) => w.name).join(', ')}`);
+  if (gone.some((w) => w.alert) && (await relayOn())) syncAlerts(true).catch(() => {}); // 알림 목록에서도 빠지게
+  if (location.hash === '' || location.hash === '#/') render();
+}
+
 /* ───────── 종목 추가 ───────── */
 async function viewAdd() {
   setTitle('종목 추가', true);
@@ -186,7 +211,7 @@ async function viewAdd() {
   let cat = sessionStorage.getItem('pzAddCat') || 'coin';
   const add = async (x) => {
     if (watch.some((w) => idOf(w) === `${cat}:${x.sym}`)) { toast('이미 있는 종목입니다'); return; }
-    watch.push({ cat, sym: x.sym, ex: x.ex || '', name: x.name, tf: CATS[cat].tfs[0] });
+    watch.push({ cat, sym: x.sym, ex: x.ex || '', name: x.name, tf: defTf(cat) });
     await setWatch(watch); toast(`${x.name} 추가`); location.hash = `#/a/${cat}/${enc(x.sym)}`;
   };
   const draw = async () => {
@@ -235,10 +260,10 @@ async function viewAdd() {
 async function viewAsset(cat, sym) {
   if (!CATS[cat]) { location.hash = '#/'; return; }
   const watch = await getWatch();
-  const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym, tf: CATS[cat].tfs[0] };
+  const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym, tf: defTf(cat) };
   const inList = watch.some((x) => x.cat === cat && x.sym === sym);
   setTitle(w.name, true);
-  const tf = CATS[cat].tfs.includes(w.tf) ? w.tf : CATS[cat].tfs[0];
+  const tf = CATS[cat].tfs.includes(w.tf) ? w.tf : defTf(cat);
   view().innerHTML = `${CATS[cat].tfs.length > 1 ? `<div class="seg" role="radiogroup" aria-label="봉 단위">${CATS[cat].tfs.map((k) => `<label><input type="radio" name="tf" value="${k}"${k === tf ? ' checked' : ''}><span>${TFS[k].label}</span></label>`).join('')}</div>` : ''}
     <div class="card" style="margin-top:10px;padding:8px"><canvas class="chart" id="cv" aria-label="가격 차트와 검토 구간"></canvas>
       <div class="muted" style="font-size:11px;margin-top:4px">빨강 상승·파랑 하락 봉 · 선: <span style="color:#E8A317">60</span>/<span style="color:#8E5CF0">120</span>/<span style="color:#1F9D63">200</span>봉 평균 · 칠한 띠: 검토 구간(진할수록 근거 많음)</div></div>
@@ -271,7 +296,7 @@ async function viewAsset(cat, sym) {
   drawChart($('#cv'), cs, r, f);
   const inside = r.zones.find((z) => r.price >= z.low && r.price <= z.high);
   $('#sum').innerHTML = `<div class="row spread"><span>현재가</span><b style="font-size:20px">${f(r.price)}${u ? ' ' + u : ''}</b></div>
-    <div class="muted" style="font-size:13px;margin-top:6px">최근 ${r.range.bars}${TFS[tf].name}봉 범위 안 위치 (저점 ${f(r.range.low)} ~ 고점 ${f(r.range.high)})</div>
+    <div class="muted" style="font-size:13px;margin-top:6px">최근 ${r.range.bars}개 ${TFS[tf].label} 범위 안 위치 (저점 ${f(r.range.low)} ~ 고점 ${f(r.range.high)})</div>
     <div class="posbar"><i style="left:${Math.max(0, Math.min(100, r.range.pos || 0))}%"></i></div><div class="row spread muted" style="font-size:12px"><span>저점</span><b>${r.range.pos != null ? r.range.pos.toFixed(0) + '%' : '-'}</b><span>고점</span></div>
     <div class="grid2" style="margin-top:8px;font-size:14px"><div>RSI(14) <b>${r.rsi != null ? r.rsi.toFixed(1) : '-'}</b> <span class="muted">${r.rsi < 30 ? '과매도' : r.rsi > 70 ? '과매수' : '보통'}</span></div><div>${esc(r.trend)}</div></div>
     ${cs.length < 200 ? `<div class="muted" style="font-size:12px;margin-top:6px">봉 ${cs.length}개로 계산했습니다${cat === 'us' && tf === 'day' ? '(무료 키는 일봉 최근 100개까지 — 긴 흐름은 주봉으로 보세요)' : ''}. 120·200봉 평균은 봉이 부족하면 빠집니다.</div>` : ''}

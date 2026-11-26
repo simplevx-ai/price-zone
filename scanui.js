@@ -1,8 +1,8 @@
 /* AI 마켓 스캐너 — 📊 ETF 선물 스캐너 화면 (OKX·바이낸스 공개 시세, 자동 주문 없음) */
 'use strict';
 
-const SC_TF = { '15m': { okx: '15m', bn: '15m', label: '15분봉', ttl: 2 * 60e3 }, '1H': { okx: '1H', bn: '1h', label: '1시간봉', ttl: 5 * 60e3 }, '4H': { okx: '4H', bn: '4h', label: '4시간봉', ttl: 10 * 60e3 }, '1D': { okx: '1Dutc', bn: '1d', label: '일봉', ttl: 30 * 60e3 } };
-const SC_SORT = { up: '🔼 반등 관심', dn: '🔽 하락 전환 관심', vol: '💰 거래대금', atr: '🌊 변동성' };
+const SC_TF = { '15m': { okx: '15m', bn: '15m', label: '15분봉', ttl: 2 * 60e3 }, '30m': { okx: '30m', bn: '30m', label: '30분봉', ttl: 3 * 60e3 }, '1H': { okx: '1H', bn: '1h', label: '1시간봉', ttl: 5 * 60e3 }, '4H': { okx: '4H', bn: '4h', label: '4시간봉', ttl: 10 * 60e3 }, '1D': { okx: '1Dutc', bn: '1d', label: '일봉', ttl: 30 * 60e3 } };
+const SC_SORT = { up: '🔼 반등 관심', dn: '🔽 하락 전환 관심', vol: '📊 거래량', atr: '🌊 변동성' };
 const SC_SET = { core: '핵심(나스닥·S&P·반도체)', top: '전체 ETF 상위 20', nasdaq: '나스닥100', sp500: 'S&P500', semi: '반도체', other: '기타 ETF' };
 
 async function scTickers() {
@@ -122,7 +122,7 @@ async function scAlertCard() {
   const cfg = await KV.get('scAlert', { enabled: false }), rs = await KV.get('relayStatus', {});
   const el = $('#scAlert'); if (!el) return;
   el.innerHTML = `<div class="card"><div class="row spread"><b>🔔 디스코드 아침 정리</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="scAl" ${cfg.enabled ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
-    <div class="muted" style="font-size:13px;margin-top:4px">매일 한국 시간 9시 10분쯤(일봉이 끝난 뒤) 스크립트가 OKX 종목으로 시장 방향, 반등·하락 전환 상위, 거래대금, 변동성 순위를 디스코드로 보냅니다. 구글 서버에서는 바이낸스가 막혀 있어 아침 정리는 OKX 기준입니다.</div>
+    <div class="muted" style="font-size:13px;margin-top:4px">매일 한국 시간 9시 10분쯤(일봉이 끝난 뒤) 스크립트가 OKX 종목으로 시장 방향, 반등·하락 전환 상위, 거래량, 변동성 순위를 디스코드로 보냅니다. 구글 서버에서는 바이낸스가 막혀 있어 아침 정리는 OKX 기준입니다.</div>
     ${rs.checkedAt && (rs.version || 0) < 9 ? '<div class="warnlist">스크립트를 새 버전(v9)으로 바꿔야 동작합니다</div>' : ''}</div>`;
   $('#scAl').onchange = async (e) => {
     if (e.target.checked && !(await relayOn())) { e.target.checked = false; alert('설정에서 알림 스크립트를 먼저 연결해 주세요'); return; }

@@ -7,7 +7,7 @@
  * 4) 매일 14시(한국 시간) 이후 한 번, 앱을 열지 않아도 알림 종목의 검토 구간을 스스로 다시 계산한다(앱과 같은 계산식).
  * 5) 🤖 AI 분석: 앱이 단계별로 보내는 글을 Claude(claude-opus-5-5)에 대신 보내고 답을 돌려준다(키는 여기만, 하루 호출 한도).
  * 6) 📡 나스닥 신호: 10분마다 OKX 공개 시세(QQQ·TQQQ·SQQQ 무기한 선물)로 규칙 신호를 계산해 바뀔 때 알린다(자동 주문 없음).
- * 7) 📊 ETF 아침 정리: 매일 한국 시간 9시 10분쯤 OKX ETF 선물의 반등·하락 전환 점수·거래대금·변동성 순위를 보낸다(자동 주문 없음).
+ * 7) 📊 ETF 아침 정리: 매일 한국 시간 9시 10분쯤 OKX ETF 선물의 반등·하락 전환 점수·거래량·변동성 순위를 보낸다(자동 주문 없음).
  * 모두 '시세 조회'만 한다. 주문·계좌 기능은 없다.
  *
  * ── 스크립트 속성(프로젝트 설정 → 스크립트 속성)에 직접 넣을 값 ──
@@ -26,7 +26,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 12;
+const VERSION = 13;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -160,8 +160,8 @@ function 가격확인() {
 }
 
 /* ───────── 구간 자동 재계산: 앱(zones.js)과 같은 계산식으로 스크립트가 직접 계산 ───────── */
-const TFK_ = { day: '일봉', week: '주봉', h4: '4시간봉', h1: '1시간봉' };
-const TFK_LABEL_ = { '일봉': 'day', '주봉': 'week', '4시간봉': 'h4', '1시간봉': 'h1' };
+const TFK_ = { day: '일봉', week: '주봉', h4: '4시간봉', h1: '1시간봉', m30: '30분봉', m15: '15분봉' };
+const TFK_LABEL_ = { '일봉': 'day', '주봉': 'week', '4시간봉': 'h4', '1시간봉': 'h1', '30분봉': 'm30', '15분봉': 'm15' };
 const kstDay_ = (t) => Utilities.formatDate(new Date(t), 'Asia/Seoul', 'yyyy-MM-dd');
 function watchMeta_() { try { return JSON.parse(readWatchRaw_()); } catch (e) { return {}; } }
 // 알림 종목(WATCH)·알림 상태(STATE) 저장: 속성 하나는 9KB까지라 2,500자씩 나눠 WATCH_0, WATCH_1 …에 저장(WATCH에는 '#chunks:N' 표시)
@@ -245,7 +245,7 @@ function 재계산점검() {
 function serverCandles_(x) {
   const tf = TFK_[x.tfk] ? x.tfk : TFK_LABEL_[x.tf] || 'day';
   if (x.cat === 'coin') {
-    const unit = { day: 'days', h4: 'minutes/240', h1: 'minutes/60' }[tf] || 'days';
+    const unit = { day: 'days', h4: 'minutes/240', h1: 'minutes/60', m30: 'minutes/30', m15: 'minutes/15' }[tf] || 'days';
     let out = [], to = '', src = '업비트';
     for (let k = 0; k < 2; k++) {
       let r = upbitRelay_('/candles/' + unit + '?market=' + x.sym + '&count=200' + (to ? '&to=' + encodeURIComponent(to) : ''));
@@ -262,7 +262,7 @@ function serverCandles_(x) {
     cs.src = src; return cs;
   }
   if (x.cat === 'cfut') {
-    const iv = { day: '1d', h4: '4h', h1: '1h' }[tf] || '1d';
+    const iv = { day: '1d', h4: '4h', h1: '1h', m30: '30m', m15: '15m' }[tf] || '1d';
     try {
       const r = UrlFetchApp.fetch('https://fapi.binance.com/fapi/v1/klines?symbol=' + encodeURIComponent(x.sym) + '&interval=' + iv + '&limit=500', { muteHttpExceptions: true });
       if (r.getResponseCode() === 200) return JSON.parse(r.getContentText()).map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
@@ -422,7 +422,7 @@ function scanBuild_() {
   L.push('');
   L.push('🔼 반등 관심(3점 이상): ' + (up.length ? up.map((r) => r.s + ' ' + r.a.upScore + '/5(일봉 ' + tr(r.d) + ')').join(', ') : '없음'));
   L.push('🔽 하락 전환 관심(3점 이상): ' + (dn.length ? dn.map((r) => r.s + ' ' + r.a.dnScore + '/5(일봉 ' + tr(r.d) + ')').join(', ') : '없음'));
-  L.push('💰 OKX 24시간 거래대금: ' + byVol.slice(0, 6).map((x) => x + ' ' + money(tick[x].vol) + '(' + pc(tick[x].chg) + ')').join(', '));
+  L.push('📊 OKX 24시간 거래량(달러 환산): ' + byVol.slice(0, 6).map((x) => x + ' ' + money(tick[x].vol) + '(' + pc(tick[x].chg) + ')').join(', '));
   const vol = R.filter((r) => r.d && r.d.atrPct != null).sort((p, q) => q.d.atrPct - p.d.atrPct);
   L.push('🌊 변동성(일봉 ATR%): 높음 ' + vol.slice(0, 4).map((r) => r.s + ' ' + r.d.atrPct.toFixed(1) + '%').join(', ') + ' / 낮음 ' + vol.slice(-3).reverse().map((r) => r.s + ' ' + r.d.atrPct.toFixed(1) + '%').join(', '));
   const jump = R.filter((r) => r.d && r.d.atrJump >= 1.5).map((r) => r.s + ' ' + r.d.atrJump.toFixed(1) + '배');
@@ -1228,7 +1228,7 @@ const ZoneMath = (() => {
 /* ───────── 코인선물 현재가: 바이낸스(구글 서버 위치에서 막힐 수 있음) → OKX ───────── */
 // 빗썸 공개 시세(업비트와 같은 모양): 시세 주소만 허용, 30초 캐시
 function bithumbGet_(path) {
-  const ok = /^\/candles\/(days|minutes\/240|minutes\/60)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) || /^\/ticker\?markets=KRW-[A-Z0-9]+(,KRW-[A-Z0-9]+){0,29}$/.test(path);
+  const ok = /^\/candles\/(days|minutes\/240|minutes\/60|minutes\/30|minutes\/15)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) || /^\/ticker\?markets=KRW-[A-Z0-9]+(,KRW-[A-Z0-9]+){0,29}$/.test(path);
   if (!ok) return { ok: false, error: '허용하지 않는 빗썸 주소입니다' };
   try {
     const r = UrlFetchApp.fetch('https://api.bithumb.com/v1' + path, { muteHttpExceptions: true });
@@ -1241,7 +1241,7 @@ function bybitPrice_(sym) {
 }
 // 기초 이름(BTC, NVDA 등)의 무기한 선물 봉: OKX → 바이비트(끝난 봉만, 오래된 것부터)
 function perpCandles_(base, tf) {
-  const B = { day: ['1Dutc', 'D', 86400e3], h4: ['4H', '240', 4 * 3600e3], h1: ['1H', '60', 3600e3] }[tf] || ['1Dutc', 'D', 86400e3];
+  const B = { day: ['1Dutc', 'D', 86400e3], h4: ['4H', '240', 4 * 3600e3], h1: ['1H', '60', 3600e3], m30: ['30m', '30', 30 * 60e3], m15: ['15m', '15', 15 * 60e3] }[tf] || ['1Dutc', 'D', 86400e3];
   try {
     const d = okx_('/market/candles?instId=' + encodeURIComponent(base) + '-USDT-SWAP&bar=' + B[0] + '&limit=300');
     const cs = d.filter((k) => k[8] === undefined || k[8] === '1').map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).reverse();
@@ -1570,7 +1570,7 @@ function 해외주식연결확인() {
 /* 업비트 공개 시세 중계: 업비트는 브라우저 직접 요청을 10초에 1번만 허용하므로 앱 대신 받아 준다.
    정해진 시세 주소 모양만 허용(주문·계좌 주소는 거절). 같은 주소는 30초 동안 캐시. */
 function upbitRelay_(path) {
-  const ok = /^\/candles\/(days|minutes\/240|minutes\/60)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) ||
+  const ok = /^\/candles\/(days|minutes\/240|minutes\/60|minutes\/30|minutes\/15)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) ||
     /^\/ticker\?markets=KRW-[A-Z0-9]+(,KRW-[A-Z0-9]+){0,29}$/.test(path) || path === '/market/all?isDetails=false';
   if (!ok) return { ok: false, error: '허용하지 않는 업비트 주소입니다' };
   const cache = CacheService.getScriptCache(), ck = 'ub_' + Utilities.base64EncodeWebSafe(path).slice(0, 200);

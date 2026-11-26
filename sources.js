@@ -13,15 +13,19 @@
 const CATS = {
   kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'krx|kis', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
   us: { label: '해외주식', icon: '🇺🇸', tfs: ['day', 'week'], unit: '$', needs: 'av', hint: '티커(예: AAPL, NVDA)' },
-  coin: { label: '코인', icon: '🪙', tfs: ['day', 'h4', 'h1'], unit: '원' },
-  cfut: { label: '코인선물', icon: '⚡', tfs: ['day', 'h4', 'h1'], unit: 'USDT' },
+  // 봉 순서는 앱 전체에서 짧은 것부터: 15분 · 30분 · 1시간 · 4시간 · 일봉 (· 주봉)
+  coin: { label: '코인', icon: '🪙', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: '원' },
+  cfut: { label: '코인선물', icon: '⚡', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: 'USDT' },
   ffut: { label: '해외선물', icon: '🌐', tfs: ['day'], unit: '', needs: 'kis', hint: '종목코드+거래소(예: NQZ25, CME)' },
 };
 const TFS = {
   day: { label: '일봉', name: '일' }, week: { label: '주봉', name: '주' },
   h4: { label: '4시간봉', name: '4시간' }, h1: { label: '1시간봉', name: '1시간' },
+  m30: { label: '30분봉', name: '30분' }, m15: { label: '15분봉', name: '15분' },
 };
-const FRESH = { day: 30 * 60e3, week: 6 * 3600e3, h4: 10 * 60e3, h1: 5 * 60e3 };
+const FRESH = { day: 30 * 60e3, week: 6 * 3600e3, h4: 10 * 60e3, h1: 5 * 60e3, m30: 3 * 60e3, m15: 2 * 60e3 };
+// 처음 고르는 봉(목록에서 맨 앞이 15분봉이어도 기본은 일봉)
+const defTf = (cat) => (CATS[cat].tfs.includes('day') ? 'day' : CATS[cat].tfs[0]);
 const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', 'krx|kis': '공공데이터 서비스키(또는 한국투자증권 키)' };
 // 국내주식 출처: 한투 키가 있으면 한투(장중 시세), 없으면 공공데이터(전 영업일까지)
 async function krSource() { const st = await KV.get('relayStatus', {}); return st.kis ? 'kis' : 'krx'; }
@@ -89,7 +93,7 @@ async function bybitGet(path) {
   let r; try { r = await fetch('https://api.bybit.com' + path); } catch { throw new Error('바이비트에 연결하지 못했습니다'); }
   const j = await r.json().catch(() => ({})); if (j.retCode !== 0) throw new Error('바이비트: ' + (j.retMsg || r.status)); return j.result;
 }
-const PERP_BAR = { day: ['1Dutc', 'D', 86400e3], h4: ['4H', '240', 4 * 3600e3], h1: ['1H', '60', 3600e3] };
+const PERP_BAR = { day: ['1Dutc', 'D', 86400e3], h4: ['4H', '240', 4 * 3600e3], h1: ['1H', '60', 3600e3], m30: ['30m', '30', 30 * 60e3], m15: ['15m', '15', 15 * 60e3] };
 // 기초 이름(BTC, NVDA 등)으로 OKX → 바이비트 무기한 선물 봉(끝난 봉만, 오래된 것부터)
 async function perpCandles(base, tf) {
   const [ob, bb, ms] = PERP_BAR[tf] || PERP_BAR.day;
@@ -117,7 +121,7 @@ async function binance(path) {
 /* ───────── 출처별 캔들 ───────── */
 async function fetchCandles(a, tf) {
   if (a.cat === 'coin') {
-    const unit = { day: 'days', h4: 'minutes/240', h1: 'minutes/60' }[tf];
+    const unit = { day: 'days', h4: 'minutes/240', h1: 'minutes/60', m30: 'minutes/30', m15: 'minutes/15' }[tf];
     const pull = async (get, total) => {
       let out = [], to = '';
       while (out.length < total) {
@@ -141,7 +145,7 @@ async function fetchCandles(a, tf) {
     cs.src = '빗썸'; return cs;
   }
   if (a.cat === 'cfut') {
-    const iv = { day: '1d', h4: '4h', h1: '1h' }[tf];
+    const iv = { day: '1d', h4: '4h', h1: '1h', m30: '30m', m15: '15m' }[tf];
     try {
       const r = await binance(`/klines?symbol=${encodeURIComponent(a.sym)}&interval=${iv}&limit=500`);
       const cs = r.filter((k) => +k[6] < Date.now()).map((k) => ({ t: k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })); // 끝난 봉만
@@ -215,7 +219,7 @@ async function quotes(list) {
   const out = {};
   const coins = [...new Set(list.filter((a) => a.cat === 'coin').map((a) => a.sym))];
   const futs = list.filter((a) => a.cat === 'cfut'), uss = list.filter((a) => a.cat === 'us');
-  const put = (t) => { out['coin:' + t.market] = { price: t.trade_price, chg: t.signed_change_rate * 100 }; };
+  const put = (t) => { out['coin:' + t.market] = { price: t.trade_price, chg: t.signed_change_rate * 100, vol: Number(t.acc_trade_price_24h) }; };
   // 업비트에 있는 코인은 업비트, 없는 코인(빗썸만)·업비트 실패는 빗썸 — 업비트는 모르는 종목이 하나라도 섞이면 전체를 거절함
   const coinQ = async () => {
     if (!coins.length) return;
@@ -233,8 +237,8 @@ async function quotes(list) {
   await Promise.all([
     coinQ().catch(() => {}),
     usQ().catch(() => {}),
-    ...futs.map((a) => binance('/ticker/24hr?symbol=' + encodeURIComponent(a.sym)).then((t) => { out['cfut:' + a.sym] = { price: +t.lastPrice, chg: +t.priceChangePercent }; })
-      .catch(() => bybitGet('/v5/market/tickers?category=linear&symbol=' + encodeURIComponent(a.sym)).then((r) => { const t = r.list && r.list[0]; if (t) out['cfut:' + a.sym] = { price: +t.lastPrice, chg: +t.price24hPcnt * 100 }; }))
+    ...futs.map((a) => binance('/ticker/24hr?symbol=' + encodeURIComponent(a.sym)).then((t) => { out['cfut:' + a.sym] = { price: +t.lastPrice, chg: +t.priceChangePercent, vol: +t.quoteVolume }; })
+      .catch(() => bybitGet('/v5/market/tickers?category=linear&symbol=' + encodeURIComponent(a.sym)).then((r) => { const t = r.list && r.list[0]; if (t) out['cfut:' + a.sym] = { price: +t.lastPrice, chg: +t.price24hPcnt * 100, vol: +t.turnover24h }; }))
       .catch(() => {})),
   ]);
   return out;
