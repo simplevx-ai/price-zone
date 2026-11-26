@@ -28,7 +28,7 @@ async function nqLoad() {
   const tick = {}, fund = {};
   await Promise.all(Object.entries(NQ.SYMS).map(async ([s, id]) => {
     try { const t = (await okxGet(`/market/ticker?instId=${id}`))[0]; tick[s] = { last: +t.last, open24: +t.open24h, vol: +t.volCcy24h, ts: +t.ts }; } catch { /* 없음 */ }
-    try { const f = (await okxGet(`/public/funding-rate?instId=${id}`))[0]; fund[s] = { rate: +f.fundingRate, next: +f.nextFundingTime }; } catch { /* 없음 */ }
+    try { const f = (await okxGet(`/public/funding-rate?instId=${id}`))[0]; fund[s] = { rate: +f.fundingRate, next: +f.fundingTime }; } catch { /* 없음 */ }
   }));
   return { qd, T, S, Q4, tick, fund };
 }

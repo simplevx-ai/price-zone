@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.5.1';
+const APP_VERSION = '2.5.2';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
