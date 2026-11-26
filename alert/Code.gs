@@ -6,6 +6,7 @@
  * 3) 업비트는 브라우저 직접 요청이 10초 1회로 막혀 있어 앱 대신 받아 준다.
  * 4) 매일 14시(한국 시간) 이후 한 번, 앱을 열지 않아도 알림 종목의 검토 구간을 스스로 다시 계산한다(앱과 같은 계산식).
  * 5) 🤖 AI 분석: 앱이 단계별로 보내는 글을 Claude(claude-opus-5-5)에 대신 보내고 답을 돌려준다(키는 여기만, 하루 호출 한도).
+ * 6) 📡 나스닥 신호: 10분마다 OKX 공개 시세(QQQ·TQQQ·SQQQ 무기한 선물)로 규칙 신호를 계산해 바뀔 때 알린다(자동 주문 없음).
  * 모두 '시세 조회'만 한다. 주문·계좌 기능은 없다.
  *
  * ── 스크립트 속성(프로젝트 설정 → 스크립트 속성)에 직접 넣을 값 ──
@@ -24,7 +25,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 7;
+const VERSION = 8;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -41,13 +42,14 @@ function doPost(e) {
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
         av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null,
-        ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_() });
+        ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_() });
     }
     if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'av') return json_(avRelay_(d));
     if (d.action === 'kis') return json_(kisRelay_(d));
     if (d.action === 'krx') return json_(krxRelay_(d));
     if (d.action === 'claude') return json_(claudeRelay_(d));
+    if (d.action === 'saveNq') { P.setProperty('NQ_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); if (d.enabled) P.deleteProperty('NQ_STATE'); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'test') { const r = send_('✅ 가격 위치 알림 테스트입니다. 이 메시지가 보이면 연결이 잘 된 것입니다.'); return json_({ ok: true, sent: r }); }
     if (d.action === 'saveWatch') {
       const items = (d.items || []).slice(0, 40).map((x) => ({
@@ -71,6 +73,7 @@ function doGet() { return ContentService.createTextOutput('price-zone alert v' +
 
 /** 10분마다 실행: 현재가가 구간에 새로 들어오면 알림 */
 function 가격확인() {
+  try { nqCheck_(true); } catch (e) { Logger.log('나스닥 신호 확인 실패: ' + (e && e.message || e)); }
   const items = watch_();
   if (!items.length) return;
   const P = PropertiesService.getScriptProperties();
@@ -269,6 +272,204 @@ function toWeekly_(cs) {
   });
   return out.map((k) => ({ t: k.t, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v }));
 }
+
+
+/* ───────── 📡 나스닥 신호: OKX 공개 시세 → nq.js 규칙(앱과 같은 계산) → 바뀔 때만 알림. 주문 기능 없음 ───────── */
+function okx_(path) {
+  const r = UrlFetchApp.fetch('https://www.okx.com/api/v5' + path, { muteHttpExceptions: true });
+  const j = JSON.parse(r.getContentText() || '{}');
+  if (r.getResponseCode() !== 200 || j.code !== '0') throw new Error('OKX 응답 오류 ' + r.getResponseCode() + ' ' + (j.msg || ''));
+  return j.data || [];
+}
+function nqData_() {
+  const qd = NQ.fromOkx(okx_('/market/candles?instId=' + NQ.SYMS.QQQ + '&bar=1Dutc&limit=300'));
+  const T = NQ.fromOkx(okx_('/market/candles?instId=' + NQ.SYMS.TQQQ + '&bar=4H&limit=300'));
+  const S = NQ.fromOkx(okx_('/market/candles?instId=' + NQ.SYMS.SQQQ + '&bar=4H&limit=300'));
+  const last = {};
+  ['TQQQ', 'SQQQ', 'QQQ'].forEach((k) => { try { last[k] = Number(okx_('/market/ticker?instId=' + NQ.SYMS[k])[0].last); } catch (e) { /* 없음 */ } });
+  return { qd: qd, T: T, S: S, last: last };
+}
+function nqStatus_() {
+  const P = PropertiesService.getScriptProperties(), cfg = JSON.parse(P.getProperty('NQ_CFG') || '{}'), st = JSON.parse(P.getProperty('NQ_STATE') || '{}');
+  return { enabled: !!cfg.enabled, regime: st.regime || null, open: st.open || {}, at: st.at || null };
+}
+const NQ_KO_ = { up: '📈 상승장', down: '📉 하락장', side: '➖ 횡보' };
+const NQ_TAIL_ = '\n\n※ 정해진 규칙의 신호입니다(공부용). 매수·매도 추천이 아니며 자동 주문은 하지 않습니다. 3배 레버리지 상품의 선물은 손실이 원금보다 커질 수 있습니다.';
+function nqFmt_(x) { return x == null || !isFinite(x) ? '-' : Number(x).toFixed(2); }
+// send=false면 계산만(편집기 점검용)
+function nqCheck_(send) {
+  const P = PropertiesService.getScriptProperties();
+  const cfg = JSON.parse(P.getProperty('NQ_CFG') || '{}');
+  if (send && !cfg.enabled) return null;
+  const D = nqData_(), ev = NQ.evaluate(D.qd, { TQQQ: D.T, SQQQ: D.S });
+  const prev = JSON.parse(P.getProperty('NQ_STATE') || '{}'), first = !prev.at, msgs = [];
+  const R = ev.regime, rTxt = R ? NQ_KO_[R.state] + ' (점수 ' + (R.score > 0 ? '+' : '') + R.score + ')' : '계산 못 함';
+  const open = {}; Object.keys(ev.open).forEach((k) => { const o = ev.open[k]; open[k] = { entryT: o.entryT, entry: o.entry, stop: o.stop, target: o.target, r1: o.r1 }; });
+  if (first) {
+    msgs.push('📡 나스닥 신호 알림을 시작합니다\n지금 장세: ' + rTxt + '\n' + (Object.keys(open).length ? '규칙상 열린 가상 포지션: ' + Object.keys(open).map((k) => k + ' 진입 ' + nqFmt_(open[k].entry) + ' · 손절 ' + nqFmt_(open[k].stop) + ' · 목표 ' + nqFmt_(open[k].target)).join(' / ') : '규칙상 열린 가상 포지션 없음(관망)') + '\n앞으로 장세가 바뀌거나 4시간봉 마감에 신호가 나오면 알립니다.');
+  } else {
+    if (R && prev.regime && prev.regime !== R.state) msgs.push('🔄 장세 바뀜: ' + NQ_KO_[prev.regime] + ' → ' + rTxt + '\n' + (R.state === 'up' ? '이제 TQQQ 진입 조건만 봅니다.' : R.state === 'down' ? '이제 SQQQ 진입 조건만 봅니다.' : '횡보라 새 진입 신호를 내지 않습니다.') + '\n확인: ' + R.checks.map((c) => (c.ok ? '✅' : '❌') + c.name).join(' · '));
+    ['TQQQ', 'SQQQ'].forEach((k) => {
+      const was = prev.open && prev.open[k], now = open[k];
+      if (was && (!now || now.entryT !== was.entryT)) {
+        const t = ev.bt.trades.filter((x) => x.sym === k && x.entryT === was.entryT)[0];
+        msgs.push((t && t.pct > 0 ? '✅ ' : '⛔ ') + k + ' 가상 포지션 청산 — ' + (t ? t.why : '기록 범위 밖') + '\n진입 ' + nqFmt_(was.entry) + ' → 청산 ' + (t ? nqFmt_(t.exit) + ' (' + (t.pct > 0 ? '+' : '') + t.pct.toFixed(2) + '%, ' + t.R.toFixed(2) + 'R)' : '-'));
+      }
+      if (now && (!was || now.entryT !== was.entryT)) {
+        const n = ev.now[k], o = ev.open[k];
+        msgs.push('🔔 ' + k + ' 매수 신호 (4시간봉 마감 ' + Utilities.formatDate(new Date(o.entryT), 'Asia/Seoul', 'M/d HH:mm') + ')\n장세 ' + rTxt + '\n진입가 ' + nqFmt_(o.entry) + ' · 손절가 ' + nqFmt_(o.stop) + ' (-' + o.riskPct.toFixed(2) + '%) · 1R ' + nqFmt_(o.r1) + ' · 목표가 ' + nqFmt_(o.target) + ' (+' + o.targetPct.toFixed(2) + '%)\n근거: MACD 히스토그램 음→양 · RSI ' + nqFmt_(n && n.rsi) + ' · 20봉 지수평균 위 · ATR ' + nqFmt_(o.atr));
+      }
+    });
+  }
+  // 진행 중인 봉에서 손절가·목표가에 닿았는지(봉 마감 전 미리 알림, 같은 포지션에 한 번씩)
+  const warned = (first ? {} : prev.warned) || {};
+  Object.keys(open).forEach((k) => {
+    const o = open[k], p = D.last[k]; if (!p) return;
+    const key = k + o.entryT;
+    if (p <= o.stop && !warned[key + 's']) { warned[key + 's'] = 1; if (!first) msgs.push('⚠️ ' + k + ' 현재가 ' + nqFmt_(p) + ' — 손절가 ' + nqFmt_(o.stop) + '에 닿았습니다(진행 중인 4시간봉, 마감 때 확정)'); }
+    if (p >= o.target && !warned[key + 't']) { warned[key + 't'] = 1; if (!first) msgs.push('🎯 ' + k + ' 현재가 ' + nqFmt_(p) + ' — 목표가 ' + nqFmt_(o.target) + '에 닿았습니다(진행 중인 4시간봉, 마감 때 확정)'); }
+  });
+  Object.keys(warned).forEach((w) => { if (!Object.keys(open).some((k) => w.indexOf(k + open[k].entryT) === 0)) delete warned[w]; });
+  if (send) {
+    msgs.forEach((m) => { try { send_('[나스닥 신호] ' + m + NQ_TAIL_); } catch (e) { Logger.log('알림 실패: ' + e.message); } });
+    P.setProperty('NQ_STATE', JSON.stringify({ regime: R ? R.state : null, open: open, warned: warned, at: new Date().toISOString() }));
+  }
+  return { ev: ev, D: D, msgs: msgs };
+}
+/** 편집기에서 실행: 지금 나스닥 신호 계산 결과를 로그로 보여 줌(알림은 보내지 않음) */
+function 나스닥신호점검() {
+  const r = nqCheck_(false), ev = r.ev, R = ev.regime;
+  Logger.log('QQQ 일봉 ' + r.D.qd.length + '개 · TQQQ 4시간봉 ' + r.D.T.length + '개 · SQQQ 4시간봉 ' + r.D.S.length + '개 · 현재가 ' + JSON.stringify(r.D.last));
+  Logger.log('장세: ' + (R ? NQ_KO_[R.state] + ' 점수 ' + R.score + ' — ' + R.checks.map((c) => (c.ok ? '✅' : '❌') + c.name).join(' · ') : '계산 못 함'));
+  Logger.log('지금 신호: ' + (ev.signal || '없음(관망)') + ' · 열린 가상 포지션: ' + (Object.keys(ev.open).join(', ') || '없음'));
+  const s = ev.bt.stats; Logger.log('최근 300봉 시험: 거래 ' + s.n + '번 · 이긴 비율 ' + (s.winRate == null ? '-' : s.winRate.toFixed(0) + '%') + ' · 합계 ' + s.totalR.toFixed(2) + 'R');
+  Logger.log('알림 설정: ' + (nqStatus_().enabled ? '켜짐' : '꺼짐(앱의 나스닥 신호 화면에서 켜기)'));
+}
+
+/* ==== nq.js 시작 (앱과 같은 신호 계산 — alert/build.mjs가 ../nq.js에서 그대로 복사, 직접 고치지 말 것) ==== */
+/* 가격 위치 — 📡 나스닥 신호 엔진 (OKX QQQ·TQQQ·SQQQ 무기한 선물, 공부용 규칙 신호)
+ * 앱(브라우저)과 알림 스크립트(Apps Script)가 같은 계산을 쓰도록 화면·네트워크 없이 계산만 한다.
+ * 자동 주문 없음. 신호는 정해진 규칙의 결과일 뿐 매수·매도 추천이 아니다.
+ * 입력 봉: 오래된 것부터 [{t(시작 시각 ms), o, h, l, c, v}], 끝나지 않은 봉은 넣지 않는다.
+ */
+const NQ = (() => {
+  const SYMS = { QQQ: 'QQQ-USDT-SWAP', TQQQ: 'TQQQ-USDT-SWAP', SQQQ: 'SQQQ-USDT-SWAP' };
+  const DEF = { rsiMin: 50, atrMult: 2, rr: 2, feePct: 0.05, emaLen: 20 };
+  const H4 = 4 * 3600e3, D1 = 86400e3;
+
+  const sma = (a, n) => a.map((_, i) => (i < n - 1 ? null : a.slice(i - n + 1, i + 1).reduce((s, x) => s + x, 0) / n));
+  function ema(a, n) { const k = 2 / (n + 1), out = []; let e = null; for (let i = 0; i < a.length; i++) { e = i === 0 ? a[0] : a[i] * k + e * (1 - k); out.push(i < n - 1 ? null : e); } return out; }
+  function rsi(c, n) {
+    n = n || 14; const out = c.map(() => null); if (c.length <= n) return out;
+    let g = 0, l = 0;
+    for (let i = 1; i <= n; i++) { const d = c[i] - c[i - 1]; if (d > 0) g += d; else l -= d; }
+    g /= n; l /= n; out[n] = l === 0 ? 100 : 100 - 100 / (1 + g / l);
+    for (let i = n + 1; i < c.length; i++) { const d = c[i] - c[i - 1]; g = (g * (n - 1) + Math.max(d, 0)) / n; l = (l * (n - 1) + Math.max(-d, 0)) / n; out[i] = l === 0 ? 100 : 100 - 100 / (1 + g / l); }
+    return out;
+  }
+  function macd(c) {
+    const e12 = ema(c, 12), e26 = ema(c, 26);
+    const line = c.map((_, i) => (e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null));
+    const start = line.findIndex((x) => x != null);
+    const sigPart = start < 0 ? [] : ema(line.slice(start), 9);
+    const sig = line.map((_, i) => (start >= 0 && i >= start ? sigPart[i - start] : null));
+    return { line, sig, hist: line.map((x, i) => (x != null && sig[i] != null ? x - sig[i] : null)) };
+  }
+  function atr(cs, n) {
+    n = n || 14; const out = cs.map(() => null); if (cs.length <= n) return out;
+    const tr = cs.map((k, i) => (i ? Math.max(k.h - k.l, Math.abs(k.h - cs[i - 1].c), Math.abs(k.l - cs[i - 1].c)) : k.h - k.l));
+    let a = tr.slice(1, n + 1).reduce((s, x) => s + x, 0) / n; out[n] = a;
+    for (let i = n + 1; i < cs.length; i++) { a = (a * (n - 1) + tr[i]) / n; out[i] = a; }
+    return out;
+  }
+  function ind(cs, p) {
+    const c = cs.map((k) => k.c), m = macd(c);
+    return { c, ema: ema(c, p.emaLen), sma20: sma(c, 20), sma50: sma(c, 50), rsi: rsi(c), macd: m.line, sig: m.sig, hist: m.hist, atr: atr(cs) };
+  }
+
+  // 장세(QQQ 일봉, 끝난 봉만): 5가지 확인 → +1/-1 합계. +3 이상 상승장, -3 이하 하락장, 그 사이 횡보
+  function regimeSeries(qd) {
+    const I = ind(qd, DEF), out = [];
+    for (let i = 0; i < qd.length; i++) {
+      if (i < 60 || I.sma50[i] == null || I.sma50[i - 10] == null || I.hist[i] == null || I.rsi[i] == null) { out.push(null); continue; }
+      const checks = [
+        { key: 'c>sma50', name: '종가가 50일 평균 위', ok: I.c[i] > I.sma50[i], val: I.sma50[i] },
+        { key: 'sma20>sma50', name: '20일 평균이 50일 평균 위', ok: I.sma20[i] > I.sma50[i], val: I.sma20[i] },
+        { key: 'slope', name: '50일 평균이 10일 전보다 높음', ok: I.sma50[i] > I.sma50[i - 10], val: I.sma50[i - 10] },
+        { key: 'macd', name: 'MACD가 시그널선 위', ok: I.hist[i] > 0, val: I.hist[i] },
+        { key: 'rsi', name: 'RSI(14) 50 이상', ok: I.rsi[i] >= 50, val: I.rsi[i] },
+      ];
+      const score = checks.reduce((s, x) => s + (x.ok ? 1 : -1), 0);
+      out.push({ t: qd[i].t, close: I.c[i], score, state: score >= 3 ? 'up' : score <= -3 ? 'down' : 'side', checks });
+    }
+    return out;
+  }
+  // 4시간봉이 끝나는 시각까지 끝난 일봉의 장세
+  function regimeLookup(qd) {
+    const rs = regimeSeries(qd);
+    return (tEnd) => { let r = null; for (let i = 0; i < qd.length; i++) { if (qd[i].t + D1 <= tEnd) { if (rs[i]) r = rs[i]; } else break; } return r; };
+  }
+  const NEED = { TQQQ: 'up', SQQQ: 'down' };
+  function entryChecks(I, i, p) {
+    return [
+      { name: 'MACD 히스토그램이 이번 봉에 음→양으로 바뀜', ok: I.hist[i] != null && I.hist[i - 1] != null && I.hist[i] > 0 && I.hist[i - 1] <= 0 },
+      { name: `RSI(14) ${p.rsiMin} 이상`, ok: I.rsi[i] != null && I.rsi[i] >= p.rsiMin, val: I.rsi[i] },
+      { name: `종가가 ${p.emaLen}봉 지수평균 위`, ok: I.ema[i] != null && I.c[i] > I.ema[i], val: I.ema[i] },
+    ];
+  }
+  function levels(entry, a, p) {
+    const stop = entry - p.atrMult * a, risk = entry - stop;
+    return { entry, stop, r1: entry + risk, target: entry + p.rr * risk, riskPct: (risk / entry) * 100, targetPct: ((p.rr * risk) / entry) * 100, atr: a };
+  }
+  // 규칙대로 지난 봉들을 따라가며 가상 매매(한 종목에 한 번에 하나)
+  function backtest(qd, inst, params) {
+    const p = Object.assign({}, DEF, params || {}), reg = regimeLookup(qd), trades = [], open = {};
+    for (const sym of ['TQQQ', 'SQQQ']) {
+      const cs = inst[sym]; if (!cs || cs.length < 40) continue;
+      const I = ind(cs, p); let pos = null;
+      for (let i = 30; i < cs.length; i++) {
+        const k = cs[i], r = reg(k.t + H4), st = r ? r.state : null;
+        if (pos) {
+          let exit = null, why = '';
+          if (k.l <= pos.stop) { exit = Math.min(k.o, pos.stop); why = '손절'; }
+          else if (k.h >= pos.target) { exit = Math.max(k.o, pos.target); why = '목표 도달'; }
+          else if (st !== NEED[sym]) { exit = k.c; why = '장세 바뀜'; }
+          else if (I.hist[i] < 0 && I.c[i] < I.ema[i]) { exit = k.c; why = '추세 약해짐'; }
+          if (exit != null) {
+            const pct = (exit / pos.entry - 1) * 100 - 2 * p.feePct;
+            trades.push(Object.assign({}, pos, { exitT: k.t + H4, exit, why, pct, R: pct / pos.riskPct, bars: i - pos.i }));
+            pos = null;
+          }
+          continue;
+        }
+        if (st === NEED[sym] && I.atr[i] != null && entryChecks(I, i, p).every((x) => x.ok)) pos = Object.assign({ sym, i, entryT: k.t + H4 }, levels(k.c, I.atr[i], p));
+      }
+      if (pos) open[sym] = pos;
+    }
+    trades.sort((a, b) => a.entryT - b.entryT);
+    let cum = 0, peak = 0, dd = 0; trades.forEach((x) => { cum += x.R; peak = Math.max(peak, cum); dd = Math.min(dd, cum - peak); });
+    const wins = trades.filter((x) => x.pct > 0).length;
+    const hold = (sym) => { const cs = inst[sym]; return cs && cs.length > 30 ? ((cs[cs.length - 1].c / cs[30].c) - 1) * 100 : null; };
+    return { p, trades, open, stats: { n: trades.length, wins, winRate: trades.length ? (wins / trades.length) * 100 : null, totalR: cum, avgR: trades.length ? cum / trades.length : null, totalPct: trades.reduce((s, x) => s + x.pct, 0), maxDD: dd, from: Math.min(...['TQQQ', 'SQQQ'].filter((s) => inst[s] && inst[s].length > 30).map((s) => inst[s][30].t)), holdT: hold('TQQQ'), holdS: hold('SQQQ') } };
+  }
+  // 지금 상태: 최신 장세, 그 장세에 맞는 종목, 마지막으로 끝난 4시간봉의 진입 조건, 규칙상 열린 가상 포지션
+  function evaluate(qd, inst, params) {
+    const p = Object.assign({}, DEF, params || {}), rs = regimeSeries(qd).filter(Boolean), regime = rs[rs.length - 1] || null;
+    const bt = backtest(qd, inst, p), want = regime ? (regime.state === 'up' ? 'TQQQ' : regime.state === 'down' ? 'SQQQ' : null) : null;
+    const now = {};
+    for (const sym of ['TQQQ', 'SQQQ']) {
+      const cs = inst[sym]; if (!cs || cs.length < 40) continue;
+      const I = ind(cs, p), i = cs.length - 1;
+      now[sym] = { t: cs[i].t + H4, close: cs[i].c, rsi: I.rsi[i], hist: I.hist[i], ema: I.ema[i], atr: I.atr[i], checks: entryChecks(I, i, p), levels: I.atr[i] ? levels(cs[i].c, I.atr[i], p) : null };
+    }
+    const sig = want && now[want] && now[want].checks.every((x) => x.ok) && !bt.open[want] ? want : null;
+    return { regime, want, now, open: bt.open, bt, signal: sig, p };
+  }
+  // OKX 봉 응답(최신 먼저, [ts,o,h,l,c,vol,…,confirm]) → 오래된 것부터, 끝난 봉만
+  function fromOkx(rows) { return (rows || []).filter((k) => k[8] === undefined || k[8] === '1').map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).reverse(); }
+  return { SYMS, DEF, H4, regimeSeries, backtest, evaluate, levels, fromOkx, ind };
+})();
+/* ==== nq.js 끝 ==== */
 
 /* ==== zones.js 시작 (앱과 같은 계산식 — alert/build.mjs가 ../zones.js에서 그대로 복사, 직접 고치지 말 것) ==== */
 /* 가격 위치 — 매수 검토 구간 계산(공부용)

@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
   { cat: 'coin', sym: 'KRW-ETH', name: '이더리움', tf: 'day' },
@@ -103,6 +103,7 @@ const routes = [
   [/^#\/a\/(\w+)\/([^/]+)$/, 'list', (m) => viewAsset(m[1], decodeURIComponent(m[2]))],
   [/^#\/c\/(KRW-[\w]+)$/, 'list', (m) => viewAsset('coin', m[1])], // 예전 주소
   [/^#\/add$/, 'list', viewAdd],
+  [/^#\/nq$/, 'nq', viewNq],
   [/^#\/ai$/, 'ai', viewAiHome],
   [/^#\/ai\/(\w+)\/([^/]+)$/, 'ai', (m) => viewAiAsset(m[1], decodeURIComponent(m[2]))],
   [/^#\/air\/([^/]+)$/, 'ai', (m) => viewAiReport(decodeURIComponent(m[1]))],
@@ -359,8 +360,8 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null });
-      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 7 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null });
+      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 8 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — 나스닥 신호 알림·AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };

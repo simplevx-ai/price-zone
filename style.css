@@ -178,7 +178,7 @@ table.lines th:first-child, table.lines td:first-child, table.lines th:nth-child
 .line-card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin: 6px 0; }
 
 /* ── 가격 위치 앱 전용 ── */
-.tabs { grid-template-columns: repeat(4, 1fr); }
+.tabs { grid-template-columns: repeat(5, 1fr); }
 .coin { display: block; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 8px; color: var(--ink); text-decoration: none; }
 .coin .nm { font-weight: 800; font-size: 16px; }
 .up { color: #D63B3B; } .down { color: #2F6FE0; }
@@ -212,3 +212,9 @@ table.md { font-size: 12px; min-width: 100%; } table.md th, table.md td { border
 .bb ul { padding-left: 18px; margin: 6px 0; font-size: 14px; } .bb li { margin-bottom: 4px; }
 @media (max-width: 520px) { .grid2.bb { grid-template-columns: 1fr; } }
 dl.terms { margin: 4px 0 0; font-size: 14px; } dl.terms dt { font-weight: 700; margin-top: 8px; } dl.terms dd { margin: 2px 0 0 0; }
+
+/* 📡 나스닥 신호 */
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.grid3 .stat { padding: 10px 8px; } .grid3 .stat b { font-size: 18px; }
+ul.checks { list-style: none; padding: 0; margin: 6px 0; font-size: 14px; } ul.checks li { margin: 3px 0; }
+.tabs a { font-size: 11px; white-space: nowrap; }
