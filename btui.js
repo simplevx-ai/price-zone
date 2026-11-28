@@ -139,6 +139,7 @@ async function viewBacktest() {
       <div class="row wrap" style="gap:6px;margin-top:10px"><button class="btn primary" id="brun" type="button">▶ 백테스트 실행</button><button class="btn" id="ball" type="button">전략 A~K 전부 비교 + 순위</button></div>
       <div id="bmsg" class="muted" style="font-size:13px;margin-top:6px"></div></div>
     <div id="bout"></div>
+    <div id="paper"></div>
     <div class="card"><details><summary><b>체결·비용 규칙</b></summary><ul class="steps" style="font-size:13px;margin-top:6px">
       <li>신호는 봉이 <b>끝난 뒤</b> 종가로 정하고, 진입·신호 청산은 <b>다음 봉 시가</b>에 체결합니다(+슬리피지). 끝나지 않은 봉은 쓰지 않습니다.</li>
       <li>손절·목표는 진입한 봉부터 확인합니다. 한 봉에서 둘 다 닿으면 순서를 알 수 없어 <b>손절로 봅니다</b>(보수적). 시가가 손절가 아래로 갭이면 손절가가 아닌 <b>시가</b>에 체결합니다.</li>
@@ -200,6 +201,7 @@ async function viewBacktest() {
       const cv = $('#bcv'); if (cv && res[0] && !res[0].error) btDraw(cv, res[0]);
       BT_LAST = { cs, hiCs, p, ctx, hiTf };
       const wb = $('#bwf'); if (wb) wb.onclick = () => btRunWf(p.strat);
+      const pb = $('#bpaper'); if (pb) pb.onclick = async () => { const nm = `${p.base} ${BT_TF[p.tf].label} ${BT_EX[p.ex]} · ${STRATS.LIST[p.strat].name}`; if (await paperStart(p, nm)) { toast('모의매매를 시작했습니다(아래 목록)'); paperCard($('#paper')); } };
       // 재현용 기록(설정·전략 버전·데이터 범위)
       const ok = res.filter((r) => !r.error), rr = await KV.get('bt:runs', []);
       ok.forEach((r) => rr.unshift({ when: btT(Date.now()), label: `${p.base} ${BT_TF[p.tf].label} ${BT_EX[p.ex]} · ${r.name}`, net: r.stats.netPct, mdd: r.stats.mdd, n: r.stats.n, ver: r.version, opt: { ...p, strat: r.strat }, from: r.from, to: r.to }));
@@ -210,6 +212,7 @@ async function viewBacktest() {
   $('#brun').onclick = () => go(false);
   view().querySelectorAll('[data-rerun]').forEach((b) => { b.onclick = () => { const o = runs[+b.dataset.rerun].opt; const set = (id, v) => { const el = $('#' + id); if (el && v != null) { if (el.tagName === 'SELECT' && ![...el.options].some((x) => x.value === String(v))) el.add(new Option(String(v), String(v))); el.value = String(v); } }; set('bx', o.ex); set('bb', o.ex === 'krx' ? 'kr:' + o.base : o.base); if (![...$('#bb').options].some((x) => x.value === $('#bb').value)) $('#bq').value = o.base; set('btf', o.tf); set('bn', o.bars); set('bs', o.strat); set('bcap', o.capital); set('brisk', o.riskPct); set('blev', o.lev); set('bfee', o.fee); set('bslip', o.slip); set('bfund', o.fund8h); set('bstop', o.stopAtr); set('brr', o.rr); set('btrail', o.trailAtr || 0); set('btime', o.timeBars || 0); if ($('#bhalf')) $('#bhalf').checked = !!o.half; fillBars(o.bars); showDesc(); window.scrollTo(0, 0); go(false); }; });
   $('#ball').onclick = () => go(true);
+  paperCard($('#paper')).catch(() => {});
 }
 
 function btAssume(r, ctx, p) {
@@ -243,6 +246,7 @@ function btReport(r, ctx, p) {
       ${r.open ? `<div class="warnlist" style="font-size:12px">아직 열린 가상 포지션: ${btT(r.open.entryT)} 진입 ${btNum(r.open.entry, 4)} · 손절 ${btNum(r.open.stop, 4)} · 목표 ${btNum(r.open.target, 4)} · 미실현 ${btNum(r.open.unreal)}</div>` : ''}
       <h4>구간별(시간순, 튜닝에 쓰지 말 것)</h4>
       <div class="tblwrap"><table class="md"><thead><tr><th>구간</th><th>기간</th><th>수익률</th><th>MDD</th><th>거래</th><th>승률</th></tr></thead><tbody>${r.segs.map((g) => `<tr><td>${g.name} ${g.w}%</td><td>${btT(g.from)}~${btT(g.to)}</td><td class="${g.ret > 0 ? 'up' : 'down'}">${btPct(g.ret)}</td><td>${btPct(g.mdd)}</td><td>${g.n}</td><td>${g.win != null ? g.win.toFixed(0) + '%' : '-'}</td></tr>`).join('')}</tbody></table></div>
+      <button class="btn block" id="bpaper" type="button" style="margin-top:8px;border-color:#1F9D63">📒 이 설정으로 모의매매 시작</button>
       <h4>📊 시장 국면별 <span class="muted">(진입 신호가 난 봉 기준)</span></h4>${btRegime(r.regimes)}
       <h4>🔁 워크포워드 검증</h4><div class="muted" style="font-size:12px">앞 구간(학습)에서만 손절·목표 조합 9개 중 하나를 고르고, 바로 다음 구간(시험)의 처음 보는 데이터로 성과를 잽니다. 4번 밀어 가며 반복합니다.</div>
       <button class="btn small" id="bwf" type="button" style="margin-top:6px">🔁 워크포워드 검증 실행</button><div id="bwfOut"></div>
@@ -335,4 +339,47 @@ function btRunWf(strat) {
         <div class="warnlist" style="font-size:12px">조합 ${w.combos}개 × ${w.folds.length}구간 = <b>${w.tried}번</b> 시험했습니다.${w.avgTrain != null && w.avgTest != null && w.avgTrain - w.avgTest > 3 ? ' 학습 성과가 시험 성과보다 크게 좋습니다 — <b>과최적화 신호</b>일 수 있습니다.' : ''} 시험 구간 성과(처음 보는 데이터)가 실제에 가깝습니다. 구간마다 ${w.T}봉.</div>`;
     } catch (e) { out.innerHTML = `<div class="errbox" style="margin-top:6px">${esc(e.message)}</div>`; }
   }, 30);
+}
+
+/* ── 📒 모의매매(PAPER) — 백테스트와 같은 엔진·규칙을 '시작한 순간 이후'의 봉에만 적용(앱을 열 때마다 새 봉까지 따라잡음) ──
+ * 서버 없이 앱 안에서 계산: 시작 시각 이후에 진입한 거래만 모의 거래로 셈. 같은 데이터면 같은 결과(재현 가능). 주문 없음. */
+async function paperList() { return KV.get('paper', []); }
+async function paperStart(p, name) {
+  const L = await paperList();
+  if (L.length >= 10) { alert('모의매매는 10개까지입니다. 안 쓰는 것을 지우세요.'); return false; }
+  L.unshift({ id: Date.now().toString(36), at: Date.now(), name, p: { ...p }, ver: STRATS.VERSION });
+  await KV.set('paper', L); return true;
+}
+async function paperEval(x) {
+  const tf = BT_TF[x.p.tf], since = Math.ceil((Date.now() - x.at) / tf.ms) + 2, need = Math.min(1500, Math.max(300, STRATS.warmup + 120 + since));
+  const cs = await btCandles(x.p.ex, x.p.base, x.p.tf, need);
+  const hiTf = tf.hi, S = STRATS.LIST[x.p.strat];
+  const hiCs = S.needsHigher && hiTf ? await btCandles(x.p.ex, x.p.base, hiTf, Math.min(1500, Math.ceil((need * tf.ms) / BT_TF[hiTf].ms) + 120)) : null;
+  const r = BT.run(cs, { ...x.p, tfMs: tf.ms, hiCs, hiMs: hiTf ? BT_TF[hiTf].ms : null });
+  const T = r.trades.filter((t) => t.entryT >= x.at), open = r.open && r.open.entryT >= x.at ? r.open : null;
+  const pnl = T.reduce((a, t) => a + t.pnl, 0), wins = T.filter((t) => t.pnl > 0).length;
+  return { T, open, pnl, wins, last: cs[cs.length - 1], bars: Math.max(0, Math.floor((Date.now() - x.at) / tf.ms)) };
+}
+async function paperCard(host) {
+  if (!host) return;
+  const L = await paperList();
+  host.innerHTML = `<div class="card" style="border:2px solid #1F9D63"><h2>📒 모의매매(PAPER) <span class="muted">(${L.length}/10)</span></h2>
+    <div class="muted" style="font-size:12px">백테스트 결과 화면의 <b>'📒 이 설정으로 모의매매 시작'</b>으로 추가합니다. 시작한 뒤에 나온 신호만 가상으로 체결해 실제처럼 성적을 쌓습니다(주문 없음 · 앱을 열 때 새 봉까지 계산).</div>
+    <div id="ppL">${L.length ? '' : '<div class="muted" style="font-size:13px;margin-top:6px">아직 모의매매가 없습니다.</div>'}</div></div>`;
+  for (const x of L) {
+    const row = document.createElement('div'); row.className = 'card'; row.style.margin = '8px 0 0';
+    row.innerHTML = `<div class="row spread"><b style="font-size:14px">${esc(x.name)}</b><button class="btn small danger" type="button">지우기</button></div><div class="muted" style="font-size:12px">${new Date(x.at).toLocaleString('ko-KR')} 시작 · 계산 중…</div>`;
+    $('#ppL').appendChild(row);
+    row.querySelector('button').onclick = async () => { if (!confirm(`'${x.name}' 모의매매를 지울까요?`)) return; await KV.set('paper', (await paperList()).filter((y) => y.id !== x.id)); paperCard(host); };
+    try {
+      const e = await paperEval(x);
+      if (!row.isConnected) return;
+      const cap = x.p.capital || 1000, ret = (e.pnl / cap) * 100, unreal = e.open ? e.open.unreal : 0;
+      row.querySelector('.muted').outerHTML = `<div style="font-size:13px;margin-top:4px">${new Date(x.at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} 시작 · 지난 봉 ${e.bars}개 · 마지막 가격 ${btNum(e.last.c, 4)}</div>
+        <div class="grid2" style="font-size:14px;margin-top:4px"><div>끝난 거래 <b>${e.T.length}번</b> · 이김 ${e.wins}</div><div>실현 손익 <b class="${e.pnl >= 0 ? 'up' : 'down'}">${e.pnl >= 0 ? '+' : ''}${e.pnl.toFixed(2)} USDT</b> (${btPct(ret)})</div></div>
+        ${e.open ? `<div class="warnlist" style="font-size:12px">🟢 지금 가상 포지션 있음: ${btT(e.open.entryT)} 진입 ${btNum(e.open.entry, 4)} · 손절 ${btNum(e.open.stop, 4)} · 목표 ${btNum(e.open.target, 4)} · 미실현 ${unreal >= 0 ? '+' : ''}${unreal.toFixed(2)}</div>` : '<div class="muted" style="font-size:12px">지금은 가상 포지션 없음(다음 신호 기다리는 중)</div>'}
+        ${e.T.length ? `<details style="margin-top:4px"><summary class="muted" style="font-size:12px">모의 거래 내역</summary><div class="tblwrap"><table class="md" style="font-size:12px"><tbody>${e.T.slice().reverse().map((t) => `<tr><td>${btT(t.entryT)}</td><td>${btNum(t.entry, 4)}→${btNum(t.exit, 4)}</td><td>${esc(t.why)}</td><td class="${t.pnl > 0 ? 'up' : 'down'}">${t.pnl.toFixed(2)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+        <div class="muted" style="font-size:11px">${esc(BT_EX[x.p.ex])} ${esc(x.p.base)} ${BT_TF[x.p.tf].label} · ${esc(STRATS.LIST[x.p.strat] ? STRATS.LIST[x.p.strat].name : x.p.strat)}${x.ver !== STRATS.VERSION ? ' · ⚠️ 시작 뒤 전략 버전이 바뀜' : ''}</div>`;
+    } catch (err) { if (row.isConnected) row.querySelector('.muted').textContent = '계산 못 함: ' + err.message; }
+  }
 }

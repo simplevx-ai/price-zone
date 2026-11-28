@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.5.0';
+const APP_VERSION = '3.6.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -173,7 +173,7 @@ async function viewList() {
   const draw = async () => {
     const L = watch.filter((w) => sel === 'all' || w.cat === sel);
     view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">📘 공부용 도구입니다. 여러 근거가 겹치는 가격대를 보여 줄 뿐 <b>매수 추천이 아니며</b>, 결정과 책임은 본인에게 있습니다.</div>
-      <div id="mk"></div>
+      <div id="mk"></div><div id="xkrf"></div><div id="xetf"></div><div id="xecon"></div>
       ${catChips(sel, true)}
       <div class="row spread" style="margin:2px 0 6px"><span class="muted" style="font-size:12px">${L.length}종목</span><button class="btn small${edit ? ' primary' : ''}" id="wedit" type="button">${edit ? '✓ 편집 끝' : '✏️ 편집(빼기)'}</button></div>
       <div id="ls">${L.map((w) => edit ? `<div class="coin row spread" data-id="${esc(idOf(w))}"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)}${w.alert ? ' 🔔' : ''}</span><button class="btn small danger" type="button" data-rm="${esc(w.cat)}|${esc(w.sym)}">🗑 빼기</button></div>` : `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
@@ -181,6 +181,9 @@ async function viewList() {
       ${(await KV.get('lowVolGone', [])).length ? `<details class="card" style="margin-top:10px"><summary class="muted" style="font-size:13px">거래가 적어 자동으로 뺀 종목</summary><div class="muted" style="font-size:12px;margin-top:4px">${(await KV.get('lowVolGone', [])).slice(0, 10).map((x) => `${esc(x.name)}(${esc(x.why)}, ${new Date(x.at).toLocaleDateString('ko-KR')})`).join(' · ')}</div></details>` : ''}
       <div class="muted" style="font-size:11px;margin-top:6px">코인은 하루 거래 10억 원, 코인선물은 100만 USDT보다 적으면 관심 종목에서 자동으로 뺍니다(비트코인·비트코인 선물·나스닥 선물·테더는 제외).</div>
       <div class="disc">시세: 업비트·빗썸·바이낸스·OKX·바이비트(공개) · Alpha Vantage · 공공데이터포털 · 한국투자증권 · v${APP_VERSION}</div>`;
+    if (sel === 'all' || sel === 'coin' || sel === 'cfut') etfCard($('#xetf')).catch(() => {});
+    if (sel !== 'coin') econCard($('#xecon')).catch(() => {});
+    if ((sel === 'all' || sel === 'kr') && watch.some((x) => x.cat === 'kr')) krWatchFlows($('#xkrf'), watch.filter((x) => x.cat === 'kr')).catch(() => {});
     macroCard($('#mk'), { title: '🌍 시장 전체', groups: sel === 'kr' ? ['kr', 'fx'] : sel === 'us' || sel === 'ffut' ? ['perp', 'us', 'fx'] : sel === 'coin' || sel === 'cfut' ? ['coin', 'fx'] : ['perp', 'us', 'fx', 'kr', 'coin'] }).catch(() => {});
     view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { sel = b.dataset.cat; sessionStorage.setItem('pzCat', sel); draw(); }; });
     $('#wedit').onclick = () => { edit = !edit; draw(); };
@@ -294,6 +297,7 @@ async function viewAsset(cat, sym) {
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
+    <div id="xpa"></div><div id="xmtf"></div>${cat === 'us' || cat === 'kr' ? '<div id="xearn"></div>' : ''}
     ${cat === 'kr' ? '<div id="krInfo"></div>' : ''}
     <div class="disc" id="srcLine">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : cat === 'kr' && (await krSource()) === 'naver' ? '<br>출처: 네이버 증권(공식 API가 아닌 공개 주소 — 스크립트가 중계, 바뀌면 멈출 수 있음)' : ''}</div>`;
   if (cat === 'kr' && (await krSource()) === 'naver') krInfoCard(sym).catch(() => {});
@@ -313,6 +317,9 @@ async function viewAsset(cat, sym) {
   let cs;
   try { cs = await candles(w, tf); } catch (e) { if (!live()) return; $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`; return; }
   if (!live()) return;
+  { const PK = { coin: 'coin', cfut: 'cfut', us: 'us', kr: 'kr' }[cat]; if (PK) paCard($('#xpa'), { app: 'pz', kind: PK, sym, name: w.name, last: cs[cs.length - 1].c }).catch(() => {});
+    mtfCard($('#xmtf'), CATS[cat].tfs.map((k) => [k, TFS[k].label.replace('봉', '')]), async (k) => candles(w, k)).catch(() => {});
+    if (cat === 'us' || cat === 'kr') earnCard($('#xearn'), w).catch(() => {}); }
   const r = ZoneMath.analyze(cs, { tf });
   if (r.error) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(r.error)}</div>`; return; }
   const f = (p) => fmtP(p, cat), u = unitOf(cat);
@@ -455,9 +462,9 @@ render();
 async function krInfoCard(code) {
   const host = $('#krInfo'); if (!host) return;
   host.innerHTML = '<div class="card"><div class="muted">네이버 종목 정보 받는 중…</div></div>';
-  let d; try { d = await relay('naver', { kind: 'info', code }); } catch (e) { if (host.isConnected) host.innerHTML = `<div class="card errbox">${esc(e.message)}</div>`; return; }
+  let d; try { d = await relay('naver', { kind: 'info', code, days: 20 }); } catch (e) { if (host.isConnected) host.innerHTML = `<div class="card errbox">${esc(e.message)}</div>`; return; }
   if (!host.isConnected) return;
-  const I = d.info || {}, q = d.quote, c = d.consensus, T = d.trend || [];
+  const I = d.info || {}, q = d.quote, c = d.consensus, T20 = d.trend || [], T = T20.slice(0, 5), BIG = krBigFlows(T20);
   const n = (x) => (x > 0 ? '+' : '') + Math.round(x).toLocaleString('ko-KR');
   const sum = (k) => T.reduce((a, x) => a + x[k], 0);
   const tgt = c && c.priceTargetMean ? Number(String(c.priceTargetMean).replace(/,/g, '')) : null;
@@ -470,5 +477,53 @@ async function krInfoCard(code) {
       ${tgt ? `<div>증권사 목표가 평균 <b>${tgt.toLocaleString('ko-KR')}원</b>${q ? ` <span class="muted">(지금가 대비 ${pct((tgt / q.price - 1) * 100, 1)})</span>` : ''}</div><div>투자의견 평균 <b>${esc(c.recommMean || '-')}</b> <span class="muted">/5</span></div>` : ''}</div>
     ${T.length ? `<h4>최근 ${T.length}거래일 수급(주)</h4><div class="tblwrap"><table class="md" style="font-size:13px"><thead><tr><th>날짜</th><th>외국인</th><th>기관</th><th>개인</th><th>외국인 보유</th></tr></thead><tbody>${T.map((x) => `<tr><td>${x.day.slice(4, 6)}/${x.day.slice(6, 8)}</td><td class="${x.foreign > 0 ? 'up' : 'down'}">${n(x.foreign)}</td><td class="${x.organ > 0 ? 'up' : 'down'}">${n(x.organ)}</td><td>${n(x.indiv)}</td><td>${esc(x.hold)}</td></tr>`).join('')}</tbody></table></div>
       <div style="font-size:13px;margin-top:4px">${T.length}일 합계: 외국인 <b class="${sum('foreign') > 0 ? 'up' : 'down'}">${n(sum('foreign'))}</b> · 기관 <b class="${sum('organ') > 0 ? 'up' : 'down'}">${n(sum('organ'))}</b> — ${sum('foreign') > 0 && sum('organ') > 0 ? '외국인·기관 함께 사는 중' : sum('foreign') < 0 && sum('organ') < 0 ? '외국인·기관 함께 파는 중' : '외국인·기관 방향이 엇갈림'}</div>` : ''}
+    ${BIG.html}
     <div class="muted" style="font-size:11px;margin-top:4px">네이버 증권 공개 주소(공식 API 아님)를 스크립트가 받아 옴 · 목표가는 증권사 의견 평균일 뿐 예측이 아님</div></div>`;
+}
+// 외국인·기관 큰 매매: 수량 × 그날 종가 = 금액(억 원). 100억 이상이면서 20일 평균(절댓값)의 2.5배 이상인 날을 큰 매매로 표시
+function krBigFlows(T) {
+  if (!T.length) return { html: '', list: [] };
+  const amt = (x, k) => (x[k] * x.close) / 1e8, avg = (k) => T.reduce((s, x) => s + Math.abs(amt(x, k)), 0) / T.length;
+  const L = [];
+  [['foreign', '외국인'], ['organ', '기관(연기금 포함)']].forEach(([k, nm]) => { const m = avg(k); T.forEach((x) => { const v = amt(x, k); if (Math.abs(v) >= 100 && Math.abs(v) >= m * 2.5) L.push({ day: x.day, who: nm, v, ratio: m ? Math.abs(v) / m : 0 }); }); });
+  L.sort((x, y) => y.day.localeCompare(x.day));
+  const sum = (k, n) => T.slice(0, n).reduce((s, x) => s + amt(x, k), 0);
+  const f5 = sum('foreign', 5), o5 = sum('organ', 5), f20 = sum('foreign', 20), o20 = sum('organ', 20);
+  const b = (v) => `<b class="${v > 0 ? 'up' : 'down'}">${v > 0 ? '+' : ''}${Math.round(v).toLocaleString('ko-KR')}억</b>`;
+  return { list: L, html: `<h4>💰 큰손 매매(금액, 억 원)</h4><div class="grid2" style="font-size:13px"><div>외국인 5일 ${b(f5)} · 20일 ${b(f20)}</div><div>기관 5일 ${b(o5)} · 20일 ${b(o20)}</div></div>
+    ${L.length ? L.slice(0, 6).map((x) => `<div style="font-size:13px;padding:3px 0">${x.v > 0 ? '🟢' : '🔴'} ${x.day.slice(4, 6)}/${x.day.slice(6, 8)} <b>${x.who}</b> ${b(x.v)} <span class="muted">(평소의 ${x.ratio.toFixed(1)}배)</span></div>`).join('') : '<div class="muted" style="font-size:12px">최근 20일 안에 평소보다 크게(100억↑·평균 2.5배↑) 사고판 날이 없습니다.</div>'}
+    <div class="muted" style="font-size:11px">국민연금(연기금)은 '기관' 안에 포함돼 따로 나뉘지 않습니다 — 연기금만 따로 보려면 한국투자증권 키(투자자별 매매)가 필요합니다. 금액은 수량 × 그날 종가로 계산한 근삿값.</div>` };
+}
+
+/* 🗓️ 실적·IR 일정(알림 스크립트 v18): 해외=Alpha Vantage, 국내=네이버 IR 일정 */
+async function earnCard(host, w) {
+  if (!host || !(await relayOn())) return;
+  let d; try { d = await relay('earn', { cat: w.cat, sym: w.sym }); } catch (e) { d = { ok: false, error: e.message }; }
+  if (!host.isConnected) return;
+  if (!d.ok) { host.innerHTML = `<div class="card muted" style="font-size:12px">🗓️ 실적 일정: ${esc(d.error || '받지 못함')}${/모르는|action/.test(d.error || '') ? ' — 알림 스크립트를 v18로 바꿔야 합니다' : ''}</div>`; return; }
+  if (w.cat === 'us') {
+    const L = (d.items || []).filter((x) => x.date);
+    if (!L.length) { host.innerHTML = '<div class="card muted" style="font-size:12px">🗓️ 앞으로 3개월 안에 잡힌 실적 발표가 없습니다(Alpha Vantage).</div>'; return; }
+    const x = L[0], days = Math.ceil((Date.parse(x.date + 'T00:00:00Z') - Date.now()) / 86400e3);
+    host.innerHTML = `<div class="card${days <= 7 ? ' warnlist' : ''}"><h2>🗓️ 다음 실적 발표</h2><div style="font-size:15px"><b>${esc(x.date)}</b> (${days}일 뒤)${x.estimate ? ` · 예상 주당순이익 $${esc(x.estimate)}` : ''} · ${esc(x.fiscal)} 분기</div>
+      <div class="muted" style="font-size:12px;margin-top:4px">${days <= 7 ? '⚠️ 실적 발표 앞뒤로 주가가 크게 튈 수 있습니다(갭). 새로 들어가려면 크기를 줄이거나 발표 뒤 방향을 보고 들어가는 사람이 많습니다.' : '실적 발표일 전후는 변동성이 커집니다.'} · 출처 Alpha Vantage(미국 동부 날짜)</div></div>`;
+  } else {
+    const ir = d.ir;
+    host.innerHTML = ir ? `<div class="card"><h2>🗓️ IR·실적 일정</h2><div style="font-size:14px">${esc(JSON.stringify(ir).replace(/["{}]/g, ' ').slice(0, 200))}</div><div class="muted" style="font-size:11px">네이버 증권</div></div>` : '<div class="card muted" style="font-size:12px">🗓️ 네이버에 잡힌 IR·실적 일정이 없습니다(국내 실적 발표일은 보통 분기 끝 뒤 4~6주 — 1·4·7·10월 하순~2·5·8·11월 중순).</div>';
+  }
+}
+
+/* 💰 관심 국내 종목 큰손 매매 요약(외국인·기관, 최근 5일 금액 + 큰 매매가 있었던 날) */
+async function krWatchFlows(host, L) {
+  if (!host || !(await relayOn()) || (await krSource()) !== 'naver') return;
+  host.innerHTML = '<div class="card"><h2>💰 관심 국내 종목 큰손 매매</h2><div class="muted">받는 중…</div></div>';
+  const rows = [];
+  for (const w of L.slice(0, 8)) {
+    try { const d = await relay('naver', { kind: 'info', code: w.sym, days: 20 }); const T = d.trend || []; const B = krBigFlows(T); const s5 = (k) => T.slice(0, 5).reduce((s, x) => s + (x[k] * x.close) / 1e8, 0); rows.push({ w, f: s5('foreign'), o: s5('organ'), big: B.list.filter((x) => Date.now() - Date.parse(x.day.slice(0, 4) + '-' + x.day.slice(4, 6) + '-' + x.day.slice(6, 8)) < 6 * 86400e3) }); } catch { /* 다음 종목 */ }
+  }
+  if (!host.isConnected) return;
+  const b = (v) => `<b class="${v > 0 ? 'up' : 'down'}">${v > 0 ? '+' : ''}${Math.round(v).toLocaleString('ko-KR')}억</b>`;
+  host.innerHTML = `<div class="card"><h2>💰 관심 국내 종목 큰손 매매 <span class="muted">(최근 5일 금액)</span></h2>
+    ${rows.map((x) => `<a class="coin" href="#/a/kr/${enc(x.w.sym)}" style="display:block;padding:6px 0"><div class="row spread" style="font-size:14px"><b>${esc(x.w.name)}</b><span>외국인 ${b(x.f)} · 기관 ${b(x.o)}</span></div>${x.big.length ? `<div style="font-size:12px">${x.big.map((y) => `${y.v > 0 ? '🟢' : '🔴'} ${y.day.slice(4, 6)}/${y.day.slice(6, 8)} ${y.who} ${b(y.v)}(평소의 ${y.ratio.toFixed(1)}배)`).join(' · ')}</div>` : ''}</a>`).join('') || '<div class="muted">받지 못했습니다</div>'}
+    <div class="muted" style="font-size:11px">🟢🔴 = 최근 일주일 안에 평소보다 크게(100억↑·20일 평균 2.5배↑) 사고판 날 · 국민연금은 기관에 포함 · 네이버 증권</div></div>`;
 }

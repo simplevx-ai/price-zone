@@ -20,13 +20,14 @@
  *   KIS_APP_SECRET       한국투자증권 앱시크릿      ┘
  *   KIS_ENV              real(실전, 기본) 또는 demo(모의투자)
  *   DATA_GO_KR_KEY       공공데이터포털 '금융위원회_주식시세정보' 서비스키 — 국내주식(한투 없이, 하루 1번 갱신)
+ *   SOSO_API_KEY         SoSoValue 무료 API 키 — 코인 ETF 입출금(선택, v18)
  *   ANTHROPIC_API_KEY    Claude API 키 — 🤖 AI 분석(종목 1개에 약 13번 호출, 모델 claude-opus-5-5)
  *   AI_DAILY_CALLS       (선택) 하루 AI 호출 한도, 비우면 130번(약 10종목)
  *
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 17;
+const VERSION = 18;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -43,13 +44,19 @@ function doPost(e) {
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
         av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null,
-        naver: true, ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_(), coinStrong: coinStrongStatus_() });
+        naver: true, liq: liqStatus_(), soso: !!P.getProperty('SOSO_API_KEY'), ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_(), coinStrong: coinStrongStatus_() });
     }
     if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'av') return json_(avRelay_(d));
     if (d.action === 'kis') return json_(kisRelay_(d));
     if (d.action === 'krx') return json_(krxRelay_(d));
     if (d.action === 'naver') return json_(naverRelay_(d));
+    if (d.action === 'savePriceAlerts') return json_(paSave_(d));
+    if (d.action === 'getPriceAlerts') return json_(paGet_(d));
+    if (d.action === 'econ') return json_(econRelay_());
+    if (d.action === 'etf') return json_(etfRelay_());
+    if (d.action === 'earn') return json_(earnRelay_(d));
+    if (d.action === 'saveLiq') { P.setProperty('LIQ_CFG', JSON.stringify({ enabled: !!d.enabled, usd: Math.max(5e6, Number(d.usd) || 3e7), at: new Date().toISOString() })); return json_({ ok: true, liq: liqStatus_() }); }
     if (d.action === 'claude') return json_(claudeRelay_(d));
     if (d.action === 'saveScan') { P.setProperty('SCAN_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'saveCoinStrong') { P.setProperty('COIN_STRONG_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
@@ -89,6 +96,8 @@ function 가격확인() {
   try { scanDaily_(); } catch (e) { Logger.log('ETF 아침 정리 실패: ' + (e && e.message || e)); }
   try { strongCheck_(false); } catch (e) { Logger.log('강한 신호 확인 실패: ' + (e && e.message || e)); }
   try { coinStrongCheck_(false); } catch (e) { Logger.log('코인 강한 신호 확인 실패: ' + (e && e.message || e)); }
+  try { paCheck_(); } catch (e) { Logger.log('가격 도달 알림 실패: ' + (e && e.message || e)); }
+  try { liqCheck_(); } catch (e) { Logger.log('대량 청산 확인 실패: ' + (e && e.message || e)); }
   const items = watch_();
   if (!items.length) return;
   const P = PropertiesService.getScriptProperties();
@@ -229,7 +238,7 @@ function naverRelay_(d) {
     }
     if (d.kind === 'info') { // 종목 정보 + 수급(최근 5일) + 지금가
       if (!/^[0-9A-Z]{6}$/.test(code)) return { ok: false, error: '종목코드 모양이 아닙니다' };
-      const it = naverJson_('https://m.stock.naver.com/api/stock/' + code + '/integration'), tr = naverJson_('https://m.stock.naver.com/api/stock/' + code + '/trend?pageSize=5');
+      const it = naverJson_('https://m.stock.naver.com/api/stock/' + code + '/integration'), tr = naverJson_('https://m.stock.naver.com/api/stock/' + code + '/trend?pageSize=' + (Number(d.days) >= 20 ? 20 : 5));
       const info = {}; (it.totalInfos || []).forEach((x) => { info[x.code] = x.value; });
       const q = naverQuotes_([code])[code] || null;
       return { ok: true, name: it.stockName, quote: q, info: info, consensus: it.consensusInfo || null,
@@ -265,6 +274,99 @@ function naverMacro_() {
 function 네이버점검() {
   const cs = naverCandles_('005930', 30), q = naverQuotes_(['005930']), ix = naverIndex_(), fx = naverRelay_({ kind: 'fx' });
   Logger.log('일봉 ' + cs.length + '개(마지막 ' + (cs.length ? Utilities.formatDate(new Date(cs[cs.length - 1].t), 'Asia/Seoul', 'M/d') + ' 종가 ' + cs[cs.length - 1].c : '-') + ') · 지금가 ' + JSON.stringify(q['005930']) + ' · 지수 ' + JSON.stringify(ix) + ' · 원/달러 ' + fx.usdkrw);
+}
+
+/* ───────── 🎯 가격 도달 알림(v18): 앱마다(pz·nf·cs) 최대 30개, 10분마다 확인, 닿으면 한 번 보내고 '보냄' 표시 ───────── */
+const PA_APPS_ = { pz: 'AI 마켓 스캐너', nf: '선물 스캐너', cs: '코인 스캐너' };
+function paLoad_(app) { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('PA_' + app) || '[]'); } catch (e) { return []; } }
+function paSave_(d) {
+  const app = PA_APPS_[d.app] ? d.app : 'pz', old = paLoad_(app), byId = {}; old.forEach((x) => { byId[x.id] = x; });
+  const items = (d.items || []).slice(0, 30).map((x) => ({
+    id: String(x.id || '').slice(0, 24), kind: ['okx', 'coin', 'cfut', 'us', 'kr'].indexOf(x.kind) >= 0 ? x.kind : 'okx',
+    sym: String(x.sym || '').toUpperCase().replace(/[^A-Z0-9.\-]/g, '').slice(0, 24), name: String(x.name || '').slice(0, 40),
+    price: Number(x.price), dir: x.dir === 'down' ? 'down' : 'up', note: String(x.note || '').slice(0, 60),
+    fired: byId[x.id] && byId[x.id].fired ? byId[x.id].fired : null })).filter((x) => x.id && x.sym && x.price > 0);
+  PropertiesService.getScriptProperties().setProperty('PA_' + app, JSON.stringify(items));
+  return { ok: true, items: items };
+}
+function paGet_(d) { return { ok: true, items: paLoad_(PA_APPS_[d.app] ? d.app : 'pz') }; }
+function paPrices_(L) {
+  const px = {}, need = (k) => L.some((x) => x.kind === k && !x.fired);
+  if (need('okx') || need('us')) { try { okx_('/market/tickers?instType=SWAP').forEach((t) => { if (/-USDT-SWAP$/.test(t.instId)) px['okx:' + t.instId.replace(/-USDT-SWAP$/, '')] = +t.last; }); } catch (e) { /* 다음에 */ } }
+  L.filter((x) => !x.fired && x.kind === 'us').forEach((x) => { px['us:' + x.sym] = px['okx:' + x.sym] || bybitPrice_(x.sym + 'USDT') || null; });
+  const coins = L.filter((x) => !x.fired && x.kind === 'coin').map((x) => x.sym);
+  if (coins.length) { try { const r = UrlFetchApp.fetch('https://api.upbit.com/v1/ticker?markets=' + coins.join(','), { muteHttpExceptions: true }); if (r.getResponseCode() === 200) JSON.parse(r.getContentText()).forEach((t) => { px['coin:' + t.market] = t.trade_price; }); } catch (e) { /* 다음에 */ } }
+  L.filter((x) => !x.fired && x.kind === 'cfut').forEach((x) => { const p = cfutPrice_(x.sym); if (p) px['cfut:' + x.sym] = p; });
+  const krs = L.filter((x) => !x.fired && x.kind === 'kr').map((x) => x.sym);
+  if (krs.length) { try { const q = naverQuotes_(krs); Object.keys(q).forEach((c) => { px['kr:' + c] = q[c].price; }); } catch (e) { /* 다음에 */ } }
+  return px;
+}
+function paCheck_() {
+  const P = PropertiesService.getScriptProperties();
+  Object.keys(PA_APPS_).forEach((app) => {
+    const L = paLoad_(app); if (!L.some((x) => !x.fired)) return;
+    const px = paPrices_(L); let changed = false;
+    L.forEach((x) => {
+      if (x.fired) return;
+      const p = px[x.kind + ':' + x.sym]; if (!p) return;
+      if (x.dir === 'up' ? p >= x.price : p <= x.price) {
+        try { send_('## 🎯 가격 도달 — ' + (x.name || x.sym) + '\n**지금 ' + fmt_(p) + '** · 설정 ' + (x.dir === 'up' ? '이상 ' : '이하 ') + fmt_(x.price) + (x.note ? '\n> ' + x.note : '') + '\n-# ' + PA_APPS_[app] + ' · 한 번만 보냄(앱에서 다시 켤 수 있음)'); x.fired = new Date().toISOString(); changed = true; } catch (e) { Logger.log('가격 도달 알림 전송 실패: ' + e.message); }
+      }
+    });
+    if (changed) P.setProperty('PA_' + app, JSON.stringify(L));
+  });
+}
+
+/* ───────── 💥 대량 청산 알림(v18): OKX BTC·ETH 최근 10분 청산 합계가 기준(기본 3천만 달러) 넘으면 ───────── */
+function liqStatus_() { const c = JSON.parse(PropertiesService.getScriptProperties().getProperty('LIQ_CFG') || '{}'); return { enabled: !!c.enabled, usd: c.usd || 3e7 }; }
+function liqCheck_() {
+  const P = PropertiesService.getScriptProperties(), cfg = liqStatus_(); if (!cfg.enabled) return;
+  const since = Date.now() - 10 * 60e3, st = JSON.parse(P.getProperty('LIQ_STATE') || '{}'), out = [];
+  [['BTC', 0.01], ['ETH', 0.1]].forEach(([c, ct]) => {
+    try {
+      const d = okx_('/public/liquidation-orders?instType=SWAP&uly=' + c + '-USDT&state=filled&limit=100'); let longs = 0, shorts = 0;
+      (d[0] && d[0].details || []).forEach((x) => { if (+x.ts < since) return; const usd = +x.sz * ct * +x.bkPx; if (x.posSide === 'long') longs += usd; else shorts += usd; });
+      if (longs + shorts >= cfg.usd && (!st[c] || Date.now() - st[c] > 60 * 60e3)) { out.push('**' + c + '** ' + (longs >= shorts ? '롱 청산 ' : '숏 청산 ') + '$' + Math.round((longs + shorts) / 1e6) + 'M (롱 $' + Math.round(longs / 1e6) + 'M · 숏 $' + Math.round(shorts / 1e6) + 'M)'); st[c] = Date.now(); }
+    } catch (e) { /* 다음에 */ }
+  });
+  if (out.length) { send_('## 💥 대량 청산 (OKX 최근 10분)\n' + out.join('\n') + '\n-# 롱 청산이 몰리면 급락 끝자락, 숏 청산이 몰리면 급등 끝자락인 경우가 많음 · 같은 코인은 1시간에 한 번'); P.setProperty('LIQ_STATE', JSON.stringify(st)); }
+}
+
+/* ───────── 📅 경제 일정(v18): 이번 주 중요 발표(Forex Factory 공개 일정, 1시간 캐시) ───────── */
+const ECON_KO_ = [[/CPI/, '소비자물가(CPI)'], [/PPI/, '생산자물가(PPI)'], [/Non-Farm|NFP/, '비농업 고용'], [/Unemployment Rate/, '실업률'], [/FOMC|Federal Funds Rate/, '미국 금리 결정(FOMC)'], [/Fed Chair|Powell/, '연준 의장 발언'], [/GDP/, 'GDP'], [/Retail Sales/, '소매판매'], [/PCE/, 'PCE 물가'], [/ISM/, 'ISM 지수'], [/JOLTS/, '구인 건수'], [/Jobless Claims/, '실업수당 청구'], [/Consumer Sentiment|Consumer Confidence/, '소비자 심리'], [/BOK|Bank of Korea/, '한국은행 금리'], [/Trade Balance/, '무역수지'], [/Crude Oil Inventories/, '원유 재고']];
+function econRelay_() {
+  const cache = CacheService.getScriptCache(), hit = cache.get('econ_w'); if (hit) return JSON.parse(hit);
+  try {
+    const r = fetchRetry_('https://nfs.faireconomy.media/ff_calendar_thisweek.json'); if (r.getResponseCode() !== 200) return { ok: false, error: '일정 응답 ' + r.getResponseCode() };
+    const L = JSON.parse(r.getContentText()).filter((x) => (x.impact === 'High' || (x.impact === 'Medium' && x.country === 'USD')) && ['USD', 'KRW', 'CNY', 'EUR', 'JPY'].indexOf(x.country) >= 0)
+      .map((x) => { const k = ECON_KO_.find(([re]) => re.test(x.title)); return { t: Date.parse(x.date), country: x.country, title: x.title, ko: k ? k[1] : '', impact: x.impact, forecast: x.forecast || '', previous: x.previous || '' }; }).sort((a, b) => a.t - b.t);
+    const out = { ok: true, at: new Date().toISOString(), items: L.slice(0, 40), src: 'Forex Factory 공개 일정' };
+    cache.put('econ_w', JSON.stringify(out), 3600); return out;
+  } catch (e) { return { ok: false, error: '경제 일정: ' + e.message }; }
+}
+
+/* ───────── 🏦 코인 현물 ETF 입출금(v18): SoSoValue 무료 API 키(SOSO_API_KEY)가 있을 때 ───────── */
+function etfRelay_() {
+  const key = (PropertiesService.getScriptProperties().getProperty('SOSO_API_KEY') || '').trim();
+  if (!key) return { ok: false, needKey: true, error: '스크립트 속성에 SOSO_API_KEY(SoSoValue 무료 키)가 없습니다' };
+  const cache = CacheService.getScriptCache(), hit = cache.get('etf_flow'); if (hit) return JSON.parse(hit);
+  const one = (type) => { const r = fetchRetry_('https://api.sosovalue.xyz/openapi/v2/etf/historicalInflowChart', { method: 'post', contentType: 'application/json', headers: { 'x-soso-api-key': key }, payload: JSON.stringify({ type: type }) }); const j = JSON.parse(r.getContentText() || '{}'); if (j.code !== 0 && j.code !== '0') throw new Error((j.msg || 'SoSoValue 응답 오류') + ' ' + r.getResponseCode()); return (j.data || []).slice(0, 15).map((x) => ({ date: x.date, net: +x.totalNetInflow, traded: +x.totalValueTraded, assets: +x.totalNetAssets, cum: +x.cumNetInflow })); };
+  try { const out = { ok: true, at: new Date().toISOString(), btc: one('us-btc-spot'), eth: one('us-eth-spot'), src: 'SoSoValue' }; cache.put('etf_flow', JSON.stringify(out), 3600); return out; }
+  catch (e) { return { ok: false, error: 'ETF 입출금: ' + e.message }; }
+}
+
+/* ───────── 🗓️ 실적 일정(v18): 해외=Alpha Vantage EARNINGS_CALENDAR(CSV), 국내=네이버 IR 일정(있을 때) ───────── */
+function earnRelay_(d) {
+  const sym = String(d.sym || '').toUpperCase();
+  try {
+    if (d.cat === 'kr') { const it = naverJson_('https://m.stock.naver.com/api/stock/' + sym + '/integration'); return { ok: true, ir: it.irScheduleInfo || null, src: '네이버' }; }
+    const key = PropertiesService.getScriptProperties().getProperty('ALPHAVANTAGE_API_KEY'); if (!key) return { ok: false, error: 'ALPHAVANTAGE_API_KEY 없음' };
+    const cache = CacheService.getScriptCache(), ck = 'earn_' + sym, hit = cache.get(ck); if (hit) return JSON.parse(hit);
+    const r = fetchRetry_('https://www.alphavantage.co/query?function=EARNINGS_CALENDAR&symbol=' + encodeURIComponent(sym) + '&horizon=3month&apikey=' + encodeURIComponent(key));
+    const rows = r.getContentText().trim().split(/\r?\n/).slice(1).map((l) => l.split(',')).filter((c) => c.length >= 5);
+    const out = { ok: true, items: rows.map((c) => ({ sym: c[0], date: c[2], fiscal: c[3], estimate: c[4] })), src: 'Alpha Vantage' };
+    cache.put(ck, JSON.stringify(out), 21600); return out;
+  } catch (e) { return { ok: false, error: '실적 일정: ' + e.message }; }
 }
 
 /* ───────── 구간 자동 재계산: 앱(zones.js)과 같은 계산식으로 스크립트가 직접 계산 ───────── */
