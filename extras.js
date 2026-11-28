@@ -23,7 +23,8 @@ async function paCard(host, a) {
   const mine = L.filter((x) => x.kind === a.kind && x.sym === a.sym);
   const draw = () => {
     host.innerHTML = `<div class="card"><h2>🎯 가격 도달 알림 <span class="muted">(디스코드, 10분마다 확인)</span></h2>
-      ${on ? '' : '<div class="warnlist" style="font-size:12px">설정(계산기) 탭에서 알림 스크립트를 연결해야 알림이 갑니다.</div>'}
+      ${on ? '' : '<div class="warnlist" style="font-size:12px">설정(계산기) 탭에서 알림 스크립트를 연결해야 디스코드 알림이 갑니다(아래 소리 알림은 연결 없이도 됨).</div>'}
+      <div class="row spread" style="font-size:13px;margin:4px 0 6px;padding:6px 8px;border:1px solid var(--line);border-radius:8px"><span>🔊 앱을 켜 둔 동안 소리로도 알림<div class="muted" style="font-size:11px">30초마다 확인 · 닿으면 "차트확인" 한마디 + 진동 · 06~24시만</div></span><button class="btn small${paSoundOn(a.app) ? ' primary' : ''}" type="button" id="paSnd">${paSoundOn(a.app) ? '켜짐' : '켜기'}</button></div>
       <div class="row" style="gap:6px;align-items:flex-end;flex-wrap:wrap"><div style="flex:1;min-width:120px"><label for="paP">가격</label><input id="paP" type="number" inputmode="decimal" value="${a.last ? +xNum(a.last).replace(/,/g, '') : ''}"></div>
         <div><label for="paD">조건</label><select id="paD"><option value="up">이 가격 이상</option><option value="down">이 가격 이하</option></select></div></div>
       <input id="paN" placeholder="메모(선택) — 예: 1차 매수 자리, 손절" style="margin-top:6px">
@@ -31,6 +32,7 @@ async function paCard(host, a) {
       <div style="margin-top:8px">${mine.length ? mine.map((x) => `<div class="row spread" style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--line)"><span>${x.dir === 'up' ? '⬆️ 이상' : '⬇️ 이하'} <b>${xNum(x.price)}</b>${x.note ? ' · ' + esc(x.note) : ''}${x.fired ? ` <span style="color:var(--green)">✅ 보냄 ${new Date(x.fired).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>` : ''}</span><span>${x.fired ? `<button class="btn small" type="button" data-par="${x.id}">다시 켜기</button>` : ''}<button class="btn small danger" type="button" data-pad="${x.id}">삭제</button></span></div>`).join('') : '<div class="muted" style="font-size:12px">이 종목에 걸린 알림이 없습니다.</div>'}</div>
       <div class="muted" style="font-size:11px;margin-top:4px">이 앱 전체 알림 ${L.length}/30개 · 닿으면 한 번 보내고 멈춥니다(다시 켜기 가능)</div></div>`;
     const save = async () => { await KV.set(key, L); if (on) { try { await relay('savePriceAlerts', { app: a.app, items: L }); } catch (e) { alert('알림 저장 실패: ' + e.message); } } draw(); };
+    host.querySelector('#paSnd').onclick = () => { const on2 = !paSoundOn(a.app); paSoundSet(a.app, on2); if (on2) { paSpeak('차트확인', true); paSoundStart(a.app); } draw(); };
     host.querySelector('#paAdd').onclick = async () => {
       const p = parseFloat(host.querySelector('#paP').value); if (!(p > 0)) { alert('가격을 넣으세요'); return; }
       if (L.length >= 30) { alert('알림은 30개까지입니다'); return; }
@@ -178,8 +180,11 @@ async function econCard(host) {
   const next = d.items.find((x) => x.t > now && x.impact === 'High');
   host.innerHTML = `<div class="card"><h2>📅 이번 주 경제 일정 <span class="muted">(중요 발표, 한국 시간)</span></h2>
     ${next ? `<div class="warnlist" style="font-size:13px">⏰ 다음 큰 발표: <b>${fl[next.country] || ''} ${esc(next.ko || next.title)}</b> — ${new Date(next.t).toLocaleString('ko-KR', { weekday: 'short', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} (${Math.max(0, Math.round((next.t - now) / 3600e3))}시간 뒤). 발표 30분 전후는 변동이 커서 새 진입을 피하는 사람이 많습니다.</div>` : ''}
-    ${d.items.map((x) => `<div class="row spread" style="font-size:13px;padding:3px 0;border-bottom:1px solid var(--line);${x.t < now ? 'opacity:.5' : ''}"><span>${x.impact === 'High' ? '🔴' : '🟠'} ${fl[x.country] || x.country} ${esc(x.ko || x.title)}${x.ko ? ` <span class="muted" style="font-size:11px">${esc(x.title)}</span>` : ''}</span><span class="muted" style="font-size:12px;white-space:nowrap">${new Date(x.t).toLocaleString('ko-KR', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}${x.forecast ? ` · 예상 ${esc(x.forecast)}` : ''}</span></div>`).join('') || '<div class="muted">이번 주 중요 발표 없음</div>'}
-    <div class="muted" style="font-size:11px;margin-top:4px">🔴 큰 영향 🟠 중간(미국) · 출처 Forex Factory 공개 일정 · 1시간마다 갱신</div></div>`;
+    ${d.items.map((x) => {
+      const res = x.actual ? `<div style="font-size:13px;margin-top:2px">결과 <b style="font-size:15px">${esc(x.actual)}</b>${x.forecast ? ` <span class="muted">(예상 ${esc(x.forecast)}${x.previous ? ' · 이전 ' + esc(x.previous) : ''})</span>` : ''} ${x.vs === 'higher' ? '<b style="color:#D64545">▲ 예상보다 높음</b>' : x.vs === 'lower' ? '<b style="color:#2E6BD6">▼ 예상보다 낮음</b>' : x.vs === 'same' ? '<b class="muted">＝ 예상과 비슷</b>' : ''}${x.note ? `<div class="muted" style="font-size:12px">${esc(x.note)}</div>` : ''}</div>` : x.t < now && x.country === 'USD' ? '<div class="muted" style="font-size:11px">결과 확인 중(공식 통계에 올라오면 자동으로 채움)</div>' : '';
+      return `<div style="padding:4px 0;border-bottom:1px solid var(--line);${x.t < now && !x.actual ? 'opacity:.6' : ''}"><div class="row spread" style="font-size:13px"><span>${x.impact === 'High' ? '🔴' : '🟠'} ${fl[x.country] || x.country} ${esc(x.ko || x.title)}${x.ko ? ` <span class="muted" style="font-size:11px">${esc(x.title)}</span>` : ''}</span><span class="muted" style="font-size:12px;white-space:nowrap">${new Date(x.t).toLocaleString('ko-KR', { weekday: 'short', hour: '2-digit', minute: '2-digit' })}${!x.actual && x.forecast ? ` · 예상 ${esc(x.forecast)}` : ''}</span></div>${res}</div>`;
+    }).join('') || '<div class="muted">이번 주 중요 발표 없음</div>'}
+    <div class="muted" style="font-size:11px;margin-top:4px">🔴 큰 영향 🟠 중간(미국) · 일정 Forex Factory 공개 일정 · 발표 결과는 미국 공식 통계(FRED)에서 자동으로 채움(고용·실업률·구인·실업수당·CPI·PCE·소매판매·금리) · 해석은 공부용 참고</div></div>`;
 }
 
 /* ── 💥 대량 청산 · 🔥 청산 밀집 접근 디스코드 알림 설정(알림 스크립트 v19) ── */
@@ -201,4 +206,70 @@ async function liqAlertCard(host) {
     catch (e) { alert('저장 실패: ' + e.message); }
   };
   host.querySelector('#lqOn').onchange = save; host.querySelector('#lqSave').onclick = save;
+}
+
+/* ── 🔊 가격 도달 소리 알림(앱을 켜 둔 동안만) — 이 폰에 저장된 알림을 30초마다 직접 확인, 닿으면 "차트확인" 한마디 + 짧은 삐 + 진동.
+ * 06:00~23:59만 울림. 같은 알림은 이 폰에서 한 번만 울림(디스코드 알림과 따로). 켜기는 화면을 눌러야 함(브라우저 소리 규칙). ── */
+const paSoundOn = (app) => { try { return localStorage.getItem('paSound:' + app) === '1'; } catch { return false; } };
+const paSoundSet = (app, on) => { try { localStorage.setItem('paSound:' + app, on ? '1' : '0'); } catch { /* 무시 */ } };
+let paAudio = null;
+function paSpeak(word, test) {
+  const h = new Date().getHours(); if (!test && (h < 6)) return; // 0~6시는 조용히
+  try { paAudio = paAudio || new (window.AudioContext || window.webkitAudioContext)(); const o = paAudio.createOscillator(), g = paAudio.createGain(); o.frequency.value = 880; g.gain.value = 0.08; o.connect(g); g.connect(paAudio.destination); o.start(); o.stop(paAudio.currentTime + 0.18); } catch { /* 소리 없이 */ }
+  try { if (window.speechSynthesis) { const u = new SpeechSynthesisUtterance(word); u.lang = 'ko-KR'; u.rate = 1.05; speechSynthesis.cancel(); setTimeout(() => speechSynthesis.speak(u), 250); } } catch { /* 음성 없이 */ }
+  try { if (navigator.vibrate) navigator.vibrate([180, 80, 180]); } catch { /* 진동 없이 */ }
+}
+async function paPricesLocal(L) {
+  const px = {}, need = (k) => L.some((x) => x.kind === k);
+  if (need('okx') || need('us')) { try { const r = await xJson('https://www.okx.com/api/v5/market/tickers?instType=SWAP'); (r.data || []).forEach((t) => { if (/-USDT-SWAP$/.test(t.instId)) { const b = t.instId.replace(/-USDT-SWAP$/, ''); px['okx:' + b] = +t.last; px['us:' + b] = +t.last; } }); } catch { /* 다음에 */ } }
+  const coins = L.filter((x) => x.kind === 'coin').map((x) => x.sym);
+  if (coins.length) { try { (await xJson('https://api.upbit.com/v1/ticker?markets=' + coins.join(','))).forEach((t) => { px['coin:' + t.market] = t.trade_price; }); } catch { /* 다음에 */ } }
+  for (const x of L.filter((y) => y.kind === 'cfut')) { try { const r = await xJson('https://fapi.binance.com/fapi/v1/ticker/price?symbol=' + x.sym); px['cfut:' + x.sym] = +r.price; } catch { /* 다음에 */ } }
+  const krs = L.filter((x) => x.kind === 'kr').map((x) => x.sym);
+  if (krs.length && (await relayOn())) { try { const d = await relay('naver', { kind: 'quotes', codes: krs.join(',') }); Object.keys(d.quotes || {}).forEach((c) => { px['kr:' + c] = d.quotes[c].price; }); } catch { /* 다음에 */ } }
+  return px;
+}
+let paTimer = null;
+function paSoundStart(app) {
+  if (paTimer || !paSoundOn(app)) return;
+  const tick = async () => {
+    if (!paSoundOn(app)) { clearInterval(paTimer); paTimer = null; return; }
+    if (document.visibilityState !== 'visible') return;
+    const L = (await KV.get('pa:' + app, [])).filter((x) => !x.fired);
+    let rung = {}; try { rung = JSON.parse(localStorage.getItem('paRung:' + app) || '{}'); } catch { rung = {}; }
+    const todo = L.filter((x) => !rung[x.id]); if (!todo.length) return;
+    const px = await paPricesLocal(todo);
+    for (const x of todo) {
+      const p = px[x.kind + ':' + x.sym]; if (!p) continue;
+      if (x.dir === 'up' ? p >= x.price : p <= x.price) {
+        rung[x.id] = Date.now(); paSpeak('차트확인');
+        if (typeof toast === 'function') toast(`🎯 ${x.name || x.sym} ${xNum(p)} — 설정 ${x.dir === 'up' ? '이상' : '이하'} ${xNum(x.price)}`);
+      }
+    }
+    try { localStorage.setItem('paRung:' + app, JSON.stringify(rung)); } catch { /* 무시 */ }
+  };
+  paTimer = setInterval(tick, 30e3); tick();
+}
+
+/* ── 📰 코인 속보(알림 스크립트 v20 — CoinNess 공개 피드, 공식 API 아님) ── */
+const NEWS_HOT = /상장폐지|상폐|해킹|탈취|ETF|SEC|연준|FOMC|금리|청산|디페깅|파산|소송|규제|승인|급등|급락|폭락|고래|입금|출금|바이낸스|업비트|빗썸/;
+async function newsCard(host) {
+  if (!host) return;
+  if (!(await relayOn())) { host.innerHTML = '<div class="card muted" style="font-size:12px">📰 코인 속보: 계산기 탭에서 알림 스크립트를 연결하면 실시간 한국어 속보가 나옵니다.</div>'; return; }
+  const draw = async (force) => {
+    let d; try { const h = await KV.get('newsCn', null); d = !force && h && Date.now() - h.at < 60e3 ? h.data : await relay('news'); if (d.ok) KV.set('newsCn', { at: Date.now(), data: d }).catch(() => {}); } catch (e) { d = { ok: false, error: e.message }; }
+    if (!host.isConnected) return false;
+    if (!d.ok) { host.innerHTML = `<div class="card muted" style="font-size:12px">📰 코인 속보: ${esc(d.error || '받지 못했습니다')}${/모르는|action/.test(d.error || '') ? ' — 알림 스크립트를 v20으로 바꿔야 합니다' : ''}</div>`; return true; }
+    const only = host.dataset.hot === '1', L = d.items.filter((x) => !only || x.important || NEWS_HOT.test(x.title)).slice(0, 25);
+    const ago = (t) => { const m = Math.round((Date.now() - t) / 60e3); return m < 60 ? m + '분 전' : Math.round(m / 60) + '시간 전'; };
+    host.innerHTML = `<div class="card"><div class="row spread"><h2 style="margin:0">📰 코인 속보 <span class="muted">(1분마다)</span></h2><span><button class="btn small${only ? ' primary' : ''}" type="button" data-nh>중요만</button> <button class="btn small" type="button" data-nr>새로</button></span></div>
+      ${L.map((x) => { const hot = x.important || NEWS_HOT.test(x.title); return `<details style="padding:5px 0;border-bottom:1px solid var(--line)"><summary style="font-size:14px;${hot ? 'font-weight:700' : ''}">${hot ? '<span style="color:#E8A317">★</span> ' : ''}${esc(x.title)} <span class="muted" style="font-size:11px;font-weight:400">${x.at ? ago(x.at) : ''}${x.code ? ' · ' + esc(x.code) : ''}</span></summary><div style="font-size:13px;margin-top:4px">${esc(x.summary)}</div><div class="muted" style="font-size:11px;margin-top:2px">독자 반응 오름 ${x.bull} · 내림 ${x.bear} · <a href="${esc(x.url)}" target="_blank" rel="noopener">원문 ↗</a></div></details>`; }).join('') || '<div class="muted">해당 속보가 없습니다</div>'}
+      <div class="muted" style="font-size:11px;margin-top:4px">출처 CoinNess(공개 피드, 공식 API 아님 — 바뀌면 멈출 수 있음) · ★ = 중요 표시 또는 상장폐지·해킹·ETF·금리 같은 단어 · 뉴스는 사실 확인 전일 수 있음</div></div>`;
+    host.querySelector('[data-nh]').onclick = () => { host.dataset.hot = only ? '0' : '1'; draw(); };
+    host.querySelector('[data-nr]').onclick = () => draw(true);
+    return true;
+  };
+  host.innerHTML = '<div class="card"><h2>📰 코인 속보</h2><div class="muted">받는 중…</div></div>';
+  await draw();
+  const tm = setInterval(async () => { if (!host.isConnected) { clearInterval(tm); return; } if (document.visibilityState === 'visible') await draw(); }, 60e3);
 }

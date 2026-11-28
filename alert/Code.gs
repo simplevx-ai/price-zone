@@ -27,7 +27,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 19;
+const VERSION = 20;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -54,6 +54,7 @@ function doPost(e) {
     if (d.action === 'savePriceAlerts') return json_(paSave_(d));
     if (d.action === 'getPriceAlerts') return json_(paGet_(d));
     if (d.action === 'econ') return json_(econRelay_());
+    if (d.action === 'news') return json_(newsRelay_(d));
     if (d.action === 'etf') return json_(etfRelay_());
     if (d.action === 'earn') return json_(earnRelay_(d));
     if (d.action === 'saveLiq') { const coins = String(d.coins || 'BTC,ETH,SOL,XRP,DOGE').toUpperCase().split(',').map((x) => x.replace(/[^A-Z0-9]/g, '')).filter(Boolean).slice(0, 8); P.setProperty('LIQ_CFG', JSON.stringify({ enabled: !!d.enabled, usd: Math.max(5e6, Number(d.usd) || 1e7), alt: Math.max(5e5, Number(d.alt) || 2e6), near: d.near !== false, coins: coins, at: new Date().toISOString() })); return json_({ ok: true, liq: liqStatus_() }); }
@@ -398,9 +399,76 @@ function econRelay_() {
     const r = fetchRetry_('https://nfs.faireconomy.media/ff_calendar_thisweek.json'); if (r.getResponseCode() !== 200) return { ok: false, error: '일정 응답 ' + r.getResponseCode() };
     const L = JSON.parse(r.getContentText()).filter((x) => (x.impact === 'High' || (x.impact === 'Medium' && x.country === 'USD')) && ['USD', 'KRW', 'CNY', 'EUR', 'JPY'].indexOf(x.country) >= 0)
       .map((x) => { const k = ECON_KO_.find(([re]) => re.test(x.title)); return { t: Date.parse(x.date), country: x.country, title: x.title, ko: k ? k[1] : '', impact: x.impact, forecast: x.forecast || '', previous: x.previous || '' }; }).sort((a, b) => a.t - b.t);
-    const out = { ok: true, at: new Date().toISOString(), items: L.slice(0, 40), src: 'Forex Factory 공개 일정' };
-    cache.put('econ_w', JSON.stringify(out), 3600); return out;
+    const items = L.slice(0, 40); try { econActuals_(items); } catch (e) { /* 결과 없이 */ }
+    const out = { ok: true, at: new Date().toISOString(), items: items, src: 'Forex Factory 공개 일정 · 발표 결과 FRED(미국 공식 통계)' };
+    cache.put('econ_w', JSON.stringify(out), items.some((x) => x.t < Date.now() && x.t > Date.now() - 6 * 3600e3 && !x.actual) ? 600 : 3600); return out;
   } catch (e) { return { ok: false, error: '경제 일정: ' + e.message }; }
+}
+
+/* 📊 발표 결과(v20): 지난 미국 발표를 FRED 공식 통계(키 없는 CSV)로 채움. 기준 월이 맞을 때만(아직 안 올라왔으면 비움) */
+const ECON_FRED_ = [
+  { re: /Non-Farm Employment Change/, id: 'PAYEMS', kind: 'diffK', lag: 1, ko: 'jobs' },
+  { re: /^Unemployment Rate/, id: 'UNRATE', kind: 'level%', lag: 1, ko: 'unemp' },
+  { re: /JOLTS Job Openings/, id: 'JTSJOL', kind: 'levelM', lag: 2, ko: 'jobs' },
+  { re: /Unemployment Claims/, id: 'ICSA', kind: 'levelK', week: true, ko: 'claims' },
+  { re: /^Core CPI m\/m/, id: 'CPILFESL', kind: 'mom', lag: 1, ko: 'infl' },
+  { re: /^CPI m\/m/, id: 'CPIAUCSL', kind: 'mom', lag: 1, ko: 'infl' },
+  { re: /^CPI y\/y/, id: 'CPIAUCSL', kind: 'yoy', lag: 1, ko: 'infl' },
+  { re: /^Core PCE Price Index m\/m/, id: 'PCEPILFE', kind: 'mom', lag: 1, ko: 'infl' },
+  { re: /^Core Retail Sales m\/m/, id: 'RSFSXMV', kind: 'mom', lag: 1, ko: 'growth' },
+  { re: /^Retail Sales m\/m/, id: 'RSAFS', kind: 'mom', lag: 1, ko: 'growth' },
+  { re: /Federal Funds Rate/, id: 'DFEDTARU', kind: 'rate', day: true, ko: 'rate' },
+];
+function fredSeries_(id) {
+  const cache = CacheService.getScriptCache(), hit = cache.get('fred_' + id); if (hit) return JSON.parse(hit);
+  const r = fetchRetry_('https://fred.stlouisfed.org/graph/fredgraph.csv?id=' + id); if (r.getResponseCode() !== 200) throw new Error('FRED ' + r.getResponseCode());
+  const rows = r.getContentText().trim().split(/\r?\n/).slice(1).map((l) => l.split(',')).filter((c) => c[1] && c[1] !== '.').slice(-30).map((c) => [c[0], Number(c[1])]);
+  cache.put('fred_' + id, JSON.stringify(rows), 1800); return rows;
+}
+const econNum_ = (s) => { const m = String(s || '').match(/-?[\d.]+/); if (!m) return null; const v = Number(m[0]), u = /K/i.test(s) ? 1e3 : /M/i.test(s) ? 1e6 : /B/i.test(s) ? 1e9 : 1; return v * u; };
+function econActuals_(items) {
+  const now = Date.now();
+  items.forEach((x) => {
+    if (x.country !== 'USD' || x.t > now - 20 * 60e3) return;
+    const m = ECON_FRED_.find((f) => f.re.test(x.title)); if (!m) return;
+    try {
+      const rows = fredSeries_(m.id); if (rows.length < 14) return;
+      const last = rows[rows.length - 1], prev = rows[rows.length - 2], d = new Date(x.t);
+      // 기준 기간 확인: 월간은 발표 월 − lag 의 1일, 주간은 발표일 7일 안, 일간은 발표일 이후
+      if (m.week) { if (!(Date.parse(last[0]) > x.t - 9 * 86400e3)) return; }
+      else if (m.day) { if (!(Date.parse(last[0] + 'T23:59:59Z') >= x.t)) return; }
+      else { const ref = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - m.lag, 1)).toISOString().slice(0, 7); if (last[0].slice(0, 7) !== ref) return; }
+      let v, txt;
+      if (m.kind === 'diffK') { v = (last[1] - prev[1]) * 1e3; txt = Math.round(v / 1e3) + 'K'; }
+      else if (m.kind === 'level%') { v = last[1]; txt = v.toFixed(1) + '%'; }
+      else if (m.kind === 'levelM') { v = last[1] * 1e3; txt = (v / 1e6).toFixed(2) + 'M'; }
+      else if (m.kind === 'levelK') { v = last[1]; txt = Math.round(v / 1e3) + 'K'; }
+      else if (m.kind === 'mom') { v = (last[1] / prev[1] - 1) * 100; txt = v.toFixed(1) + '%'; }
+      else if (m.kind === 'yoy') { const y = rows[rows.length - 13]; v = (last[1] / y[1] - 1) * 100; txt = v.toFixed(1) + '%'; }
+      else if (m.kind === 'rate') { v = last[1]; txt = v.toFixed(2) + '%'; }
+      x.actual = txt; x.actualRef = last[0];
+      const f = econNum_(x.forecast), a = /%/.test(txt) ? Number(txt.replace('%', '')) : v;
+      const fv = f == null ? null : (/%/.test(x.forecast) ? f : f);
+      if (fv != null && isFinite(a)) {
+        const diff = a - fv, tol = /%/.test(txt) ? 0.05 : Math.abs(fv) * 0.02;
+        x.vs = Math.abs(diff) <= tol ? 'same' : diff > 0 ? 'higher' : 'lower';
+        const N = { jobs: ['고용이 예상보다 강함 — 경기 좋음, 금리 인하 늦춰질 수 있음', '고용이 예상보다 약함 — 경기 둔화 신호, 금리 인하 기대↑'], unemp: ['실업률이 예상보다 높음 — 경기 둔화 신호, 금리 인하 기대↑', '실업률이 예상보다 낮음 — 고용 탄탄'], claims: ['실업수당 청구가 예상보다 많음 — 고용 약해지는 신호', '실업수당 청구가 예상보다 적음 — 고용 탄탄'], infl: ['물가가 예상보다 높음 — 금리 부담, 주식·코인에 부정적인 편', '물가가 예상보다 낮음 — 금리 인하 기대, 위험자산에 우호적인 편'], growth: ['소비가 예상보다 강함 — 경기 좋음', '소비가 예상보다 약함 — 경기 둔화 신호'], rate: ['금리가 예상보다 높게 결정', '금리가 예상보다 낮게 결정'] }[m.ko];
+        x.note = x.vs === 'same' ? '예상과 비슷' : N[x.vs === 'higher' ? 0 : 1];
+      }
+    } catch (e) { /* 이 항목은 결과 없이 */ }
+  });
+}
+
+/* ───────── 📰 코인 속보(v20): CoinNess 공개 피드(공식 API 아님 — 바뀌면 멈출 수 있음), 1분 캐시, 제목·요약·원문 링크만 ───────── */
+function newsRelay_(d) {
+  const cache = CacheService.getScriptCache(), hit = cache.get('news_cn'); if (hit) return JSON.parse(hit);
+  try {
+    const r = fetchRetry_('https://api.coinness.com/feed/v1/breaking-news?limit=40', { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    if (r.getResponseCode() !== 200) return { ok: false, error: '속보 응답 ' + r.getResponseCode() };
+    const L = JSON.parse(r.getContentText()).map((x) => ({ id: x.id, title: String(x.title || '').slice(0, 160), summary: String(x.content || '').replace(/\s+/g, ' ').slice(0, 220), code: x.quickOrderCode || '', important: !!x.isImportant, bull: +x.bullCount || 0, bear: +x.bearCount || 0, at: Date.parse(x.publishAt) || null, url: 'https://coinness.com/news/' + x.id }));
+    const out = { ok: true, at: new Date().toISOString(), items: L, src: 'CoinNess 속보' };
+    cache.put('news_cn', JSON.stringify(out), 60); return out;
+  } catch (e) { return { ok: false, error: '코인 속보: ' + e.message }; }
 }
 
 /* ───────── 🏦 코인 현물 ETF 입출금(v18): SoSoValue 무료 API 키(SOSO_API_KEY)가 있을 때 ───────── */

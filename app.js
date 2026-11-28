@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.7.0';
+const APP_VERSION = '3.8.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -527,3 +527,6 @@ async function krWatchFlows(host, L) {
     ${rows.map((x) => `<a class="coin" href="#/a/kr/${enc(x.w.sym)}" style="display:block;padding:6px 0"><div class="row spread" style="font-size:14px"><b>${esc(x.w.name)}</b><span>외국인 ${b(x.f)} · 기관 ${b(x.o)}</span></div>${x.big.length ? `<div style="font-size:12px">${x.big.map((y) => `${y.v > 0 ? '🟢' : '🔴'} ${y.day.slice(4, 6)}/${y.day.slice(6, 8)} ${y.who} ${b(y.v)}(평소의 ${y.ratio.toFixed(1)}배)`).join(' · ')}</div>` : ''}</a>`).join('') || '<div class="muted">받지 못했습니다</div>'}
     <div class="muted" style="font-size:11px">🟢🔴 = 최근 일주일 안에 평소보다 크게(100억↑·20일 평균 2.5배↑) 사고판 날 · 국민연금은 기관에 포함 · 네이버 증권</div></div>`;
 }
+
+// 🔊 가격 도달 소리 알림: 켜 둔 경우 앱을 열면 바로 감시 시작
+try { paSoundStart('pz'); } catch { /* 없음 */ }
