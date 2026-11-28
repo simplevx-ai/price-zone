@@ -24,7 +24,7 @@ async function nqHist(inst, bar, pages) {
 }
 async function nqLoad() {
   const qd = await nqHist(NQ.SYMS.QQQ, '1Dutc', 3);
-  const T = await nqHist(NQ.SYMS.TQQQ, '4H', 10), S = await nqHist(NQ.SYMS.SQQQ, '4H', 10), Q4 = await nqHist(NQ.SYMS.QQQ, '4H', 0);
+  const T = await nqHist(NQ.SYMS.TQQQ, '4H', 10), S = await nqHist(NQ.SYMS.SQQQ, '4H', 10), Q4 = await nqHist(NQ.SYMS.QQQ, '4H', 3); // 600봉: 타점 점수의 과거 결과 계산용
   const tick = {}, fund = {};
   await Promise.all(Object.entries(NQ.SYMS).map(async ([s, id]) => {
     try { const t = (await okxGet(`/market/ticker?instId=${id}`))[0]; tick[s] = { last: +t.last, open24: +t.open24h, vol: +t.volCcy24h, ts: +t.ts }; } catch { /* 없음 */ }
@@ -94,7 +94,7 @@ async function viewNq() {
       <div class="muted" style="font-size:11px">선: QQQ 종가 · 배경: <span style="color:var(--red)">상승장</span>/<span style="color:var(--blue)">하락장</span>/회색 횡보</div></div>
     <div class="card"><h2>QQQ · TQQQ · SQQQ 비교</h2><div class="grid3">${px('QQQ', D.Q4)}${px('TQQQ', D.T)}${px('SQQQ', D.S)}</div>
       <div class="muted" style="font-size:12px;margin-top:8px">배율 확인(24시간 변화 ÷ QQQ): TQQQ ${ratio(t1)} · SQQQ ${ratio(s1)} — 원래 TQQQ는 약 +3배, SQQQ는 약 −3배로 움직입니다. 크게 다르면 미국장이 쉬는 시간의 선물 가격이거나 괴리가 생긴 것입니다.</div></div>
-    ${sigCard}${btCard}${alertCard}
+    ${nqPlanCard(D)}${sigCard}${btCard}${alertCard}
     <div class="card"><details><summary><b>신호 규칙 자세히</b></summary><ol class="steps" style="margin-top:8px">
       <li><b>장세(QQQ 일봉)</b>: 종가>50일 평균 · 20일>50일 평균 · 50일 평균이 10일 전보다 높음 · MACD>시그널 · RSI≥50 — 맞으면 +1, 아니면 −1.</li>
       <li><b>종목</b>: 상승장이면 TQQQ, 하락장이면 SQQQ(인버스)만 봅니다. 횡보면 새로 들어가지 않습니다.</li>
@@ -109,6 +109,7 @@ async function viewNq() {
     <div class="disc">시세: OKX 공개 API(QQQ·TQQQ·SQQQ-USDT-SWAP) · ${nqTime(Date.now())} 기준 · 자동 주문 없음</div>`;
 
   // 그래프
+  nqPlanBind();
   drawNqRegime($('#nqReg'), D.qd.slice(-150), NQ.regimeSeries(D.qd).slice(-150));
   drawNqEquity($('#nqEq'), bt.trades);
   $('#nqAl').onchange = async (e) => {

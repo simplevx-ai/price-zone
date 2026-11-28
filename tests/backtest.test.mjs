@@ -104,5 +104,27 @@ function flat(n) { return Array.from({ length: n }, (_, i) => ({ t: T0 + i * H, 
   const sum = (keys) => g.filter((x) => keys.includes(x.key)).reduce((a, x) => a + x.n, 0);
   const nT = sum(['up', 'side', 'down', 'na_t']), nV = sum(['high', 'low', 'na_v']);
   ok(`국면별 거래 수 합 = 전체(${r.trades.length}) — 추세 ${nT}·변동성 ${nV}`, nT === r.trades.length && nV === r.trades.length, { nT, nV, all: r.trades.length, g: g.map((x) => x.key + ':' + x.n) }); }
+// 16) 2026-11-28 추가 전략 G~K도 미래 봉을 보지 않음
+for (const k of ['G', 'H', 'I', 'J', 'K']) {
+  const cs = series(900, H, 7), cut = 650;
+  const full = BT.run(cs, { ...base, strat: k }), part = BT.run(cs.slice(0, cut), { ...base, strat: k });
+  const endT = cs[cut - 1].t;
+  const a = full.trades.filter((x) => x.exitT < endT).map((x) => [x.entryT, x.exitT, x.why, +x.pnl.toFixed(8)]);
+  const b = part.trades.filter((x) => x.exitT < endT).map((x) => [x.entryT, x.exitT, x.why, +x.pnl.toFixed(8)]);
+  ok(`미래 봉 차단 — 전략 ${k} (거래 ${a.length}개 같음)`, JSON.stringify(a) === JSON.stringify(b), { a: a.length, b: b.length });
+}
+// 17) 시간 손절: 정해진 봉 수가 되면 다음 봉 시가에 청산
+{ const cs = flat(200), r = BT.run(cs, { ...base, strat: 'T', slip: 0, fee: 0, fund8h: 0, timeBars: 5 }), t = r.trades[0];
+  ok('시간 손절 5봉 → 진입 뒤 6번째 봉 시가에 청산', t && /시간 손절/.test(t.why) && t.bars === 6 && Math.abs(t.exit - 100) < 1e-9, t); }
+// 18) 1R 절반 익절: 절반은 1R 가격, 남은 절반은 손절이 본전으로
+{ const cs = flat(200); cs[105] = { ...cs[105], o: 100, h: 104.5, l: 99.5, c: 104 }; cs[108] = { ...cs[108], o: 99.8, h: 100, l: 98, c: 99 };
+  const r = BT.run(cs, { ...base, strat: 'T', slip: 0, fee: 0, fund8h: 0, half: true });
+  const h = r.trades.find((x) => x.part), rest = r.trades.find((x) => !x.part);
+  ok('1R 절반 익절 + 남은 절반 본전 손절', h && rest && Math.abs(h.qty - rest.qty) < 1e-9 && Math.abs(h.R - 0.5) < 0.02 && rest.why.startsWith('손절') && Math.abs(rest.exit - rest.entry) < 1e-6, { h, rest }); }
+// 19) 트레일링 손절은 올라가기만 하고 이익을 지킴
+{ const cs = flat(220); for (let i = 102; i < 130; i++) cs[i] = { ...cs[i], o: 100 + (i - 101), h: 101.5 + (i - 101), l: 99.5 + (i - 101), c: 101 + (i - 101) };
+  for (let i = 130; i < 220; i++) cs[i] = { ...cs[i], o: 110, h: 111, l: 105, c: 110 };
+  const r = BT.run(cs, { ...base, strat: 'T', slip: 0, fee: 0, fund8h: 0, trailAtr: 2, rr: 50 }), t = r.trades[0];
+  ok('트레일링 손절로 이익 보존(청산가 > 진입가)', t && t.why.startsWith('손절') && t.exit > t.entry, t); }
 console.log(`\n결과: 통과 ${pass} · 실패 ${fail}`);
 process.exit(fail ? 1 : 0);

@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.1.1';
+const APP_VERSION = '3.2.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },

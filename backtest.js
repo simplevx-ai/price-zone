@@ -26,7 +26,10 @@ const BT = (() => {
     return { cs: sorted, issues };
   }
 
-  const DEF = { capital: 1000, riskPct: 1, lev: 1, fee: 0.05, slip: 0.05, fund8h: 0.01, stopAtr: 2, rr: 2, split: [60, 20, 20] };
+  // trailAtr: 0이면 끔, 아니면 '진입 뒤 최고 종가 − ATR × 배수'로 손절을 올림(내리지 않음, 다음 봉부터 적용)
+  // timeBars: 0이면 끔, 아니면 그 봉 수만큼 들고 있으면 다음 봉 시가에 청산(시간 손절)
+  // half: true면 1R 이익에 절반 익절하고 남은 절반의 손절을 진입가(본전)로 옮김
+  const DEF = { capital: 1000, riskPct: 1, lev: 1, fee: 0.05, slip: 0.05, fund8h: 0.01, stopAtr: 2, rr: 2, trailAtr: 0, timeBars: 0, half: false, split: [60, 20, 20] };
 
   function run(rawCs, opt) {
     const o = Object.assign({}, DEF, opt || {}), S = STRATS.LIST[o.strat];
@@ -38,14 +41,16 @@ const BT = (() => {
     const fee = o.fee / 100, slip = o.slip / 100, f8 = o.fund8h / 100;
     let cash = o.capital, pos = null, pendIn = false, pendOut = '';
     const trades = [], curve = [], costs = { fee: 0, slip: 0, fund: 0 };
-    const close = (k, px, why, i) => {
-      const exitPx = px * (1 - slip), notional = pos.qty * exitPx, f = notional * fee;
-      costs.fee += f; costs.slip += pos.qty * px * slip;
-      const gross = pos.qty * (exitPx - pos.entry);
+    // frac < 1이면 일부만 청산(1R 절반 익절) — 진입 수수료·펀딩·위험도 같은 비율로 나눔
+    const close = (k, px, why, i, frac) => {
+      frac = frac || 1;
+      const q = pos.qty * frac, exitPx = px * (1 - slip), f = q * exitPx * fee, feeIn = pos.feeIn * frac, fund = pos.fund * frac, risk = pos.risk * frac;
+      costs.fee += f; costs.slip += q * px * slip;
+      const gross = q * (exitPx - pos.entry);
       cash += gross - f;
-      const pnl = gross - f - pos.feeIn - pos.fund;
-      trades.push({ entryT: pos.entryT, entry: pos.entry, exitT: k.t, exit: exitPx, qty: pos.qty, why, pnl, pct: (pnl / pos.eqAt) * 100, R: pnl / pos.risk, bars: i - pos.i + 1, fee: pos.feeIn + f, fund: pos.fund, stop: pos.stop, target: pos.target, reason: pos.reason });
-      pos = null;
+      const pnl = gross - f - feeIn - fund;
+      trades.push({ entryT: pos.entryT, entry: pos.entry, exitT: k.t, exit: exitPx, qty: q, why, pnl, pct: (pnl / pos.eqAt) * 100, R: pnl / pos.risk, bars: i - pos.i + 1, fee: feeIn + f, fund, stop: pos.stop, target: pos.target, reason: pos.reason, part: frac < 1 });
+      if (frac < 1) { pos.qty -= q; pos.feeIn -= feeIn; pos.fund -= fund; pos.risk -= risk; } else pos = null;
     };
     for (let i = STRATS.warmup; i < cs.length; i++) {
       const k = cs[i];
@@ -59,7 +64,7 @@ const BT = (() => {
           const eq = cash, risk = eq * (o.riskPct / 100), qty = Math.min(risk / (entry - stop), (eq * o.lev) / entry);
           if (qty > 0) {
             const feeIn = qty * entry * fee; cash -= feeIn; costs.fee += feeIn; costs.slip += qty * k.o * slip;
-            pos = { i, entryT: k.t, entry, stop, target: entry + o.rr * (entry - stop), qty, feeIn, fund: 0, risk: qty * (entry - stop), eqAt: eq, reason: S.name };
+            pos = { i, entryT: k.t, entry, stop, target: entry + o.rr * (entry - stop), r1: entry + (entry - stop), halfDone: false, hiC: entry, qty, feeIn, fund: 0, risk: qty * (entry - stop), eqAt: eq, reason: S.name };
           }
         }
       }
@@ -69,6 +74,7 @@ const BT = (() => {
         else if (k.l <= pos.stop) close(k, pos.stop, '손절', i);
         else if (k.o >= pos.target) close(k, k.o, '목표(갭)', i);
         else if (k.h >= pos.target) close(k, pos.target, '목표', i);
+        else if (o.half && !pos.halfDone && k.h >= pos.r1) { close(k, Math.max(pos.r1, k.o), '1R 절반 익절', i, 0.5); pos.halfDone = true; pos.stop = Math.max(pos.stop, pos.entry); }
       }
       // 4) 펀딩비: 이 봉 동안 UTC 0·8·16시를 지나면(봉 시작 < 정산 시각 ≤ 봉 끝) 명목가 × 가정 비율
       if (pos && f8) {
@@ -76,9 +82,11 @@ const BT = (() => {
         if (n8 > 0) { const f = pos.qty * k.c * f8 * n8; pos.fund += f; cash -= f; costs.fund += f; }
       }
       // 5) 이번 봉 종가로 신호 → 다음 봉에 체결(마지막 봉 신호는 다음 봉이 없어 체결 안 함)
+      // 트레일링 손절: 이 봉이 끝난 뒤 최고 종가로 다음 봉의 손절을 올림(미래 안 봄)
+      if (pos && o.trailAtr > 0 && P.I.atr[i] > 0) { pos.hiC = Math.max(pos.hiC, k.c); pos.stop = Math.max(pos.stop, pos.hiC - o.trailAtr * P.I.atr[i]); }
       if (i < cs.length - 1) {
         if (!pos && S.enter(P, i)) pendIn = true;
-        else if (pos) { const why = S.exit(P, i); if (why) pendOut = why; }
+        else if (pos) { const why = S.exit(P, i) || (o.timeBars > 0 && i - pos.i + 1 >= o.timeBars ? `시간 손절(${o.timeBars}봉)` : ''); if (why) pendOut = why; }
       }
       curve.push({ t: k.t + o.tfMs, eq: cash + (pos ? pos.qty * (k.c * (1 - slip) - pos.entry) - pos.qty * k.c * (1 - slip) * fee : 0) });
     }

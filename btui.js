@@ -1,5 +1,5 @@
 /* AI 마켓 스캐너 — 🧪 백테스트 화면 (거래소 공개 봉으로 과거 가상 체결 · 실제 주문 없음)
- * 데이터: OKX(최근 300봉 + 과거 페이지) 또는 바이낸스(한 번에 최대 1500봉) 무기한 선물. 끝난 봉만.
+ * 데이터: OKX(최근 300봉 + 과거 페이지)·바이낸스(최대 1500봉)·바이비트(1000봉씩 이어 받기)·게이트(최대 2000봉) 무기한 선물. 끝난 봉만.
  * 거래소 무기한 선물 가격이며 미국 상장 ETF 실제 가격이 아니다(24시간 거래, 펀딩비 있음). 둘을 섞지 않는다.
  * 상품 정보(계약 크기·최소 수량·호가 단위)를 거래소에서 확인하고, 확인이 안 되는 상품은 실행하지 않는다.
  */
@@ -15,7 +15,14 @@ const BT_TF = {
   '1H': { label: '1시간봉', ms: 3600e3, okx: '1H', bn: '1h', hi: '4H' }, '4H': { label: '4시간봉', ms: 4 * 3600e3, okx: '4H', bn: '4h', hi: '1D' },
   '1D': { label: '일봉', ms: 86400e3, okx: '1Dutc', bn: '1d', hi: null },
 };
-const BT_EX = { okx: 'OKX', bn: '바이낸스' };
+const BT_EX = { okx: 'OKX', bn: '바이낸스', by: '바이비트', gate: '게이트' };
+// 거래소별 수수료(한쪽, %, 일반 등급 공개 요율 기준 — 등급·쿠폰에 따라 다름)
+const BT_FEES = { okx: { taker: 0.05, maker: 0.02 }, bn: { taker: 0.05, maker: 0.02 }, by: { taker: 0.055, maker: 0.02 }, gate: { taker: 0.05, maker: 0.02 } };
+const BT_BY_IV = { '15m': '15', '30m': '30', '1H': '60', '4H': '240', '1D': 'D' }, BT_GATE_IV = { '15m': '15m', '30m': '30m', '1H': '1h', '4H': '4h', '1D': '1d' };
+// '살펴볼 기간': 봉 개수를 날짜로 바꿔 보여 줌
+const btSpan = (n, tf) => { const d = (n * BT_TF[tf].ms) / 86400e3; return d >= 60 ? `약 ${(d / 30).toFixed(d >= 300 ? 0 : 1)}개월` : d >= 2 ? `약 ${Math.round(d)}일` : `약 ${Math.round(d * 24)}시간`; };
+const BT_BARS = [300, 500, 1000, 1500, 2000];
+const BT_STRATS = () => Object.keys(STRATS.LIST).filter((k) => /^[A-K]$/.test(k));
 
 // 상품 정보(거래소에서 직접) — 없으면 null
 async function btMeta(ex, base) {
@@ -25,6 +32,13 @@ async function btMeta(ex, base) {
   if (ex === 'okx') {
     const r = (await okxGet(`/public/instruments?instType=SWAP&instId=${encodeURIComponent(base)}-USDT-SWAP`))[0];
     if (r && r.state === 'live') data = { sym: r.instId, kind: r.instCategory === '3' ? '주식·ETF 무기한 선물(OKX 분류 3)' : '코인 무기한 선물', ctVal: r.ctVal + ' ' + r.ctValCcy, ctMult: r.ctMult, lotSz: r.lotSz, minSz: r.minSz, tickSz: r.tickSz, ctType: r.ctType, settle: r.settleCcy, listed: +r.listTime || null };
+  } else if (ex === 'by') {
+    const r = await fetch(`https://api.bybit.com/v5/market/instruments-info?category=linear&symbol=${encodeURIComponent(base)}USDT`).then((x) => x.json()).catch(() => null);
+    const it = r && r.retCode === 0 && r.result.list && r.result.list[0];
+    if (it && it.status === 'Trading') data = { sym: it.symbol, kind: (it.contractType || '') + ' 무기한', lotSz: it.lotSizeFilter.qtyStep, minSz: it.lotSizeFilter.minOrderQty, tickSz: it.priceFilter.tickSize, settle: it.settleCoin, listed: +it.launchTime || null };
+  } else if (ex === 'gate') {
+    const it = await fetch(`https://api.gateio.ws/api/v4/futures/usdt/contracts/${encodeURIComponent(base)}_USDT`).then((x) => (x.ok ? x.json() : null)).catch(() => null);
+    if (it && it.name && !it.in_delisting) data = { sym: it.name, kind: '무기한 선물(USDT)', ctVal: it.quanto_multiplier + ' ' + base, lotSz: '1계약', minSz: it.order_size_min, tickSz: it.order_price_round, settle: 'USDT', listed: it.create_time ? it.create_time * 1000 : null };
   } else {
     let ei = await KV.get('btBnInfo', null);
     if (!ei || Date.now() - ei.at > 86400e3) { ei = { at: Date.now(), data: (await binance('/exchangeInfo')).symbols.map((s) => ({ symbol: s.symbol, status: s.status, contractType: s.contractType, underlyingType: s.underlyingType, quoteAsset: s.quoteAsset, onboardDate: s.onboardDate, filters: s.filters })) }; KV.set('btBnInfo', ei).catch(() => {}); }
@@ -37,6 +51,24 @@ async function btMeta(ex, base) {
 // 봉 받기(끝난 봉만, 오래된 것부터)
 async function btCandles(ex, base, tf, want, onProg) {
   const f = BT_TF[tf];
+  if (ex === 'by') { // 1000봉씩, 최신부터 거꾸로 이어 받기
+    let out = [], end = '';
+    while (out.length < want) {
+      const r = await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(base)}USDT&interval=${BT_BY_IV[tf]}&limit=1000${end ? '&end=' + end : ''}`).then((x) => x.json());
+      if (r.retCode !== 0) throw new Error('바이비트 응답 오류: ' + (r.retMsg || r.retCode));
+      const L = r.result.list || []; if (!L.length) break;
+      out = out.concat(L); end = String(+L[L.length - 1][0] - 1);
+      if (onProg) onProg(out.length);
+      if (L.length < 1000) break; await sleep(150);
+    }
+    const seen = new Set();
+    return out.filter((k) => +k[0] + f.ms <= Date.now() && !seen.has(k[0]) && seen.add(k[0])).map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] })).sort((a, b) => a.t - b.t).slice(-want);
+  }
+  if (ex === 'gate') {
+    const r = await fetch(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${encodeURIComponent(base)}_USDT&interval=${BT_GATE_IV[tf]}&limit=${Math.min(2000, want + 1)}`).then((x) => x.json());
+    if (!Array.isArray(r)) throw new Error('게이트 응답 오류: ' + ((r && (r.message || r.label)) || ''));
+    return r.filter((k) => k.t * 1000 + f.ms <= Date.now()).map((k) => ({ t: k.t * 1000, o: +k.o, h: +k.h, l: +k.l, c: +k.c, v: +k.v })).slice(-want);
+  }
   if (ex === 'bn') {
     const r = await binance(`/klines?symbol=${encodeURIComponent(base)}USDT&interval=${f.bn}&limit=${Math.min(1500, want)}`);
     return r.filter((k) => +k[6] < Date.now()).map((k) => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
@@ -61,7 +93,7 @@ const btT = (t) => new Date(t).toLocaleString('ko-KR', { year: '2-digit', month:
 
 async function viewBacktest() {
   setTitle('🧪 백테스트');
-  const P = Object.assign({ ex: 'okx', base: 'QQQ', tf: '1H', bars: 1000, strat: 'B', capital: 1000, riskPct: 1, lev: 1, fee: 0.05, slip: 0.05, fund8h: 0.01, stopAtr: 2, rr: 2 }, await KV.get('btPrefs', {}));
+  const P = Object.assign({ ex: 'okx', base: 'QQQ', tf: '1H', bars: 1000, strat: 'B', capital: 1000, riskPct: 1, lev: 1, fee: 0.05, feeKind: 'taker', slip: 0.05, fund8h: 0.01, stopAtr: 2, rr: 2, trailAtr: 0, timeBars: 0, half: false }, await KV.get('btPrefs', {}));
   const runs = await KV.get('bt:runs', []);
   const opt = (v, t, cur) => `<option value="${v}"${String(v) === String(cur) ? ' selected' : ''}>${t}</option>`;
   const num = (id, label, v, step, hint) => `<div><label for="${id}">${label}</label><input id="${id}" type="number" inputmode="decimal" step="${step}" value="${v}"><div class="muted" style="font-size:11px">${hint}</div></div>`;
@@ -72,20 +104,24 @@ async function viewBacktest() {
         <div><label for="bx">거래소</label><select id="bx">${Object.entries(BT_EX).map(([k, v]) => opt(k, v, P.ex)).join('')}</select></div>
         <div><label for="bb">상품(무기한 선물)</label><select id="bb">${BT_PRODUCTS.map((p) => opt(p.id, p.name, P.base)).join('')}${BT_PRODUCTS.some((p) => p.id === P.base) ? '' : opt(P.base, P.base, P.base)}</select></div>
         <div><label for="btf">봉</label><select id="btf">${Object.entries(BT_TF).map(([k, v]) => opt(k, v.label, P.tf)).join('')}</select></div>
-        <div><label for="bn">봉 개수(기간)</label><select id="bn">${[300, 500, 1000, 1500].map((n) => opt(n, n + '개', P.bars)).join('')}</select></div>
+        <div><label for="bn">살펴볼 기간</label><select id="bn"></select><div class="muted" style="font-size:11px">고른 봉으로 거슬러 올라가는 기간(괄호는 봉 수)</div></div>
       </div>
-      <label for="bs">전략</label><select id="bs">${Object.entries(STRATS.LIST).filter(([k]) => /^[A-F]$/.test(k)).map(([k, v]) => opt(k, v.name, P.strat)).join('')}</select>
+      <label for="bs">전략</label><select id="bs">${BT_STRATS().map((k) => opt(k, STRATS.LIST[k].name, P.strat)).join('')}</select>
       <div class="muted" id="bsd" style="font-size:12px;margin-top:4px"></div>
       <details style="margin-top:8px"><summary><b>비용·위험 설정</b> <span class="muted" style="font-size:12px">(가정값 — 결과에 함께 표시)</span></summary><div class="grid2">
         ${num('bcap', '초기 자본(USDT)', P.capital, 100, '가상 자금')}
         ${num('brisk', '거래당 위험(자산의 %)', P.riskPct, 0.5, '손절에 닿으면 잃는 비율')}
         ${num('blev', '최대 배율', P.lev, 1, '명목가 ≤ 자산 × 배율')}
-        ${num('bfee', '수수료(한쪽, %)', P.fee, 0.01, 'OKX 테이커 약 0.05%')}
+        <div><label for="bfk">수수료 기준</label><select id="bfk">${opt('taker', '시장가(테이커)', P.feeKind)}${opt('maker', '지정가(메이커)', P.feeKind)}${opt('custom', '직접 입력', P.feeKind)}</select><div class="muted" style="font-size:11px">거래소를 바꾸면 그 거래소 요율로 채움</div></div>
+        ${num('bfee', '수수료(한쪽, %)', P.fee, 0.01, '일반 등급 공개 요율 기준')}
         ${num('bslip', '슬리피지(한쪽, %)', P.slip, 0.01, '체결가가 불리하게 밀리는 정도')}
         ${num('bfund', '펀딩비(8시간마다, %)', P.fund8h, 0.005, '롱이 내는 가정값. 실제는 매번 달라짐')}
         ${num('bstop', '손절(ATR 배수)', P.stopAtr, 0.5, '진입가 − ATR × 배수')}
-        ${num('brr', '목표(손익비 R)', P.rr, 0.5, '진입가 + 위험 × R')}</div></details>
-      <div class="row wrap" style="gap:6px;margin-top:10px"><button class="btn primary" id="brun" type="button">▶ 백테스트 실행</button><button class="btn" id="ball" type="button">전략 A~F 전부 비교</button></div>
+        ${num('brr', '목표(손익비 R)', P.rr, 0.5, '진입가 + 위험 × R')}
+        ${num('btrail', '트레일링 손절(ATR 배수, 0=끔)', P.trailAtr, 0.5, '오른 만큼 손절을 따라 올림')}
+        ${num('btime', '시간 손절(봉 수, 0=끔)', P.timeBars, 1, '이만큼 들고 있으면 정리')}
+        <div><label class="row" style="margin-top:22px;gap:6px"><input type="checkbox" id="bhalf"${P.half ? ' checked' : ''}> 1R 절반 익절 + 본전 손절</label><div class="muted" style="font-size:11px">1R에 절반 팔고 남은 절반 손절을 진입가로</div></div></div></details>
+      <div class="row wrap" style="gap:6px;margin-top:10px"><button class="btn primary" id="brun" type="button">▶ 백테스트 실행</button><button class="btn" id="ball" type="button">전략 A~K 전부 비교 + 순위</button></div>
       <div id="bmsg" class="muted" style="font-size:13px;margin-top:6px"></div></div>
     <div id="bout"></div>
     <div class="card"><details><summary><b>체결·비용 규칙</b></summary><ul class="steps" style="font-size:13px;margin-top:6px">
@@ -93,13 +129,19 @@ async function viewBacktest() {
       <li>손절·목표는 진입한 봉부터 확인합니다. 한 봉에서 둘 다 닿으면 순서를 알 수 없어 <b>손절로 봅니다</b>(보수적). 시가가 손절가 아래로 갭이면 손절가가 아닌 <b>시가</b>에 체결합니다.</li>
       <li>상위 봉(전략 F)은 그 봉이 끝난 뒤부터만 씁니다. 지표가 생기기 전 앞쪽 60봉은 신호를 내지 않습니다.</li>
       <li>수수료는 진입·청산 명목가에 각각, 펀딩비는 UTC 0·8·16시(한국 9·17·1시)를 지날 때마다 명목가 × 가정 비율. <b>실제 과거 펀딩비가 아닌 가정값</b>입니다.</li>
+      <li>트레일링 손절은 봉이 끝난 뒤 최고 종가 − ATR × 배수로 <b>다음 봉부터</b> 올립니다(내리지 않음). 시간 손절은 정한 봉 수를 채운 다음 봉 시가에 정리합니다. 1R 절반 익절은 1R 가격에 절반을 팔고(거래 내역에 따로 한 줄), 남은 절반의 손절을 진입가로 옮깁니다.</li>
       <li>아직 하지 않은 것: 계약 수량·호가 단위 반올림, 숏(매도) 진입, 지정가·부분 체결, 실제 과거 펀딩비. 결과는 이 가정에 따라 달라집니다.</li>
       <li>기간은 시간순으로 개발 60% · 검증 20% · 테스트 20%로 나눠 각각 보여 줍니다. 테스트 구간 결과로 설정을 맞추면 과최적화가 됩니다.</li></ul></details></div>
     ${runs.length ? `<div class="card"><h2>지난 실행 <span class="muted">(${runs.length})</span></h2>${runs.slice(0, 10).map((r, i) => `<div class="logrow row spread" style="gap:6px"><span>${esc(r.when)} · ${esc(r.label)} · <b class="${r.net > 0 ? 'up' : 'down'}">${btPct(r.net)}</b> · MDD ${btPct(r.mdd)} · ${r.n}번 <span class="muted">(전략 v${esc(r.ver)}${r.ver !== STRATS.VERSION ? ' — 지금 버전과 다름' : ''})</span></span>${r.opt ? `<button class="btn small" type="button" data-rerun="${i}">다시 실행</button>` : ''}</div>`).join('')}<div class="muted" style="font-size:11px;margin-top:4px">다시 실행은 같은 설정으로 지금 데이터를 새로 받아 돌립니다(기간이 바뀌어 결과가 다를 수 있음).</div></div>` : ''}
     <div class="disc">공부용 · 실제 주문 없음 · <a href="#/learn">📘 검토 구간 근거 설명</a> · v${APP_VERSION}</div>`;
   const showDesc = () => { $('#bsd').textContent = STRATS.LIST[$('#bs').value].desc; };
+  const fillBars = (keep) => { const tf = $('#btf').value, cur = keep || +$('#bn').value || P.bars; $('#bn').innerHTML = BT_BARS.map((n) => opt(n, `최근 ${btSpan(n, tf)} (${n}봉)`, cur)).join(''); if (!BT_BARS.includes(cur)) $('#bn').value = '1000'; };
+  fillBars(P.bars); $('#btf').addEventListener('change', () => fillBars());
+  const fillFee = () => { const k = $('#bfk').value, f = BT_FEES[$('#bx').value]; if (k !== 'custom' && f) $('#bfee').value = f[k]; };
+  $('#bfk').onchange = fillFee; $('#bx').addEventListener('change', fillFee);
+  $('#bfee').addEventListener('input', () => { $('#bfk').value = 'custom'; });
   $('#bs').onchange = showDesc; showDesc();
-  const read = () => ({ ex: $('#bx').value, base: $('#bb').value, tf: $('#btf').value, bars: +$('#bn').value, strat: $('#bs').value, capital: +$('#bcap').value, riskPct: +$('#brisk').value, lev: +$('#blev').value, fee: +$('#bfee').value, slip: +$('#bslip').value, fund8h: +$('#bfund').value, stopAtr: +$('#bstop').value, rr: +$('#brr').value });
+  const read = () => ({ ex: $('#bx').value, base: $('#bb').value, tf: $('#btf').value, bars: +$('#bn').value, strat: $('#bs').value, capital: +$('#bcap').value, riskPct: +$('#brisk').value, lev: +$('#blev').value, fee: +$('#bfee').value, feeKind: $('#bfk').value, slip: +$('#bslip').value, fund8h: +$('#bfund').value, stopAtr: +$('#bstop').value, rr: +$('#brr').value, trailAtr: +$('#btrail').value || 0, timeBars: Math.max(0, Math.round(+$('#btime').value || 0)), half: $('#bhalf').checked });
   const go = async (all) => {
     const p = read(), msg = (t) => { $('#bmsg').innerHTML = t; };
     if (!(p.capital > 0 && p.riskPct > 0 && p.lev > 0 && p.stopAtr > 0 && p.rr > 0 && p.fee >= 0 && p.slip >= 0 && p.fund8h >= 0)) { msg('<span style="color:var(--red)">설정 값을 확인하세요(0보다 커야 하는 값이 있음)</span>'); return; }
@@ -109,12 +151,12 @@ async function viewBacktest() {
       msg('상품 정보 확인 중…');
       const meta = await btMeta(p.ex, p.base);
       if (!meta) { msg(`<span style="color:var(--red)">${esc(BT_EX[p.ex])}에 ${esc(p.base)} USDT 무기한 선물이 없거나 거래 중이 아니라 실행하지 않습니다(상품 정보를 확인할 수 없는 상품은 제외).</span>`); return; }
-      msg(`${esc(BT_EX[p.ex])} ${esc(p.base)} ${BT_TF[p.tf].label} 받는 중…`);
+      msg(`${esc(BT_EX[p.ex])} ${esc(p.base)} ${BT_TF[p.tf].label} 최근 ${btSpan(p.bars, p.tf)} 받는 중…`);
       const fetched = new Date();
       const cs = await btCandles(p.ex, p.base, p.tf, p.bars, (k) => msg(`봉 받는 중… ${k}개`));
       const hiTf = BT_TF[p.tf].hi;
       let hiCs = null;
-      const keys = all ? ['A', 'B', 'C', 'D', 'E', 'F'] : [p.strat];
+      const keys = all ? BT_STRATS() : [p.strat];
       if (keys.includes('F') && hiTf) { msg('상위 봉 받는 중…'); hiCs = await btCandles(p.ex, p.base, hiTf, Math.min(1500, Math.ceil((p.bars * BT_TF[p.tf].ms) / BT_TF[hiTf].ms) + 120)); }
       const ctx = { meta, fetched, src: `${BT_EX[p.ex]} ${meta.sym} ${BT_TF[p.tf].label}` };
       const res = [];
@@ -123,6 +165,7 @@ async function viewBacktest() {
         try { const r = BT.run(cs, { ...p, strat: k, tfMs: BT_TF[p.tf].ms, hiCs, hiMs: hiTf ? BT_TF[hiTf].ms : null }); r.regimes = BT.byRegime(r, cs); res.push(r); } catch (e) { res.push({ strat: k, name: STRATS.LIST[k].name, error: e.message }); }
       }
       msg('');
+      if (all) { msg('순위 계산 중(워크포워드 검증)…'); await sleep(30); res.forEach((r) => { if (r.error) return; try { r.wf = BT.walkForward(cs, { ...p, strat: r.strat, tfMs: BT_TF[p.tf].ms, hiCs, hiMs: hiTf ? BT_TF[hiTf].ms : null }); } catch (e) { r.wfErr = e.message; } }); msg(''); }
       $('#bout').innerHTML = all ? btCompare(res, ctx, p) : btReport(res[0], ctx, p);
       const cv = $('#bcv'); if (cv && res[0] && !res[0].error) btDraw(cv, res[0]);
       BT_LAST = { cs, hiCs, p, ctx, hiTf };
@@ -135,19 +178,19 @@ async function viewBacktest() {
     finally { $('#brun').disabled = $('#ball').disabled = false; }
   };
   $('#brun').onclick = () => go(false);
-  view().querySelectorAll('[data-rerun]').forEach((b) => { b.onclick = () => { const o = runs[+b.dataset.rerun].opt; const set = (id, v) => { const el = $('#' + id); if (el && v != null) { if (el.tagName === 'SELECT' && ![...el.options].some((x) => x.value === String(v))) el.add(new Option(String(v), String(v))); el.value = String(v); } }; set('bx', o.ex); set('bb', o.base); set('btf', o.tf); set('bn', o.bars); set('bs', o.strat); set('bcap', o.capital); set('brisk', o.riskPct); set('blev', o.lev); set('bfee', o.fee); set('bslip', o.slip); set('bfund', o.fund8h); set('bstop', o.stopAtr); set('brr', o.rr); showDesc(); window.scrollTo(0, 0); go(false); }; });
+  view().querySelectorAll('[data-rerun]').forEach((b) => { b.onclick = () => { const o = runs[+b.dataset.rerun].opt; const set = (id, v) => { const el = $('#' + id); if (el && v != null) { if (el.tagName === 'SELECT' && ![...el.options].some((x) => x.value === String(v))) el.add(new Option(String(v), String(v))); el.value = String(v); } }; set('bx', o.ex); set('bb', o.base); set('btf', o.tf); set('bn', o.bars); set('bs', o.strat); set('bcap', o.capital); set('brisk', o.riskPct); set('blev', o.lev); set('bfee', o.fee); set('bslip', o.slip); set('bfund', o.fund8h); set('bstop', o.stopAtr); set('brr', o.rr); set('btrail', o.trailAtr || 0); set('btime', o.timeBars || 0); if ($('#bhalf')) $('#bhalf').checked = !!o.half; fillBars(o.bars); showDesc(); window.scrollTo(0, 0); go(false); }; });
   $('#ball').onclick = () => go(true);
 }
 
 function btAssume(r, ctx, p) {
   const m = ctx.meta, iss = r.issues;
   return `<details style="margin-top:8px"><summary class="muted" style="font-size:13px">가정·데이터·상품 정보</summary><ul class="steps" style="font-size:12px;margin-top:4px">
-    <li>데이터: ${esc(ctx.src)} · 봉 ${r.bars}개(앞 ${STRATS.warmup}봉은 지표 준비) · ${btT(r.from)} ~ ${btT(r.to)} · 받은 시각 ${btT(ctx.fetched)}</li>
+    <li>데이터: ${esc(ctx.src)} · 최근 ${btSpan(r.bars, p.tf)}(봉 ${r.bars}개, 앞 ${STRATS.warmup}봉은 지표 준비) · ${btT(r.from)} ~ ${btT(r.to)} · 받은 시각 ${btT(ctx.fetched)}</li>
     <li>데이터 검사: 중복 ${iss.dup} · 비정상 봉 ${iss.bad} · 빈 구간 ${iss.gaps}곳(${iss.gapBars}봉)${iss.dup || iss.bad ? ' — 문제 봉은 빼고 계산' : ''}${iss.gaps ? ' — 빈 구간은 채우지 않음(거래 중단·점검 시간일 수 있음)' : ''}</li>
     <li>상품: ${esc(m.sym)} · ${esc(m.kind)}${m.ctVal ? ' · 1계약 = ' + esc(m.ctVal) : ''}${m.lotSz ? ' · 수량 단위 ' + esc(m.lotSz) : ''}${m.minSz ? ' · 최소 ' + esc(m.minSz) : ''}${m.tickSz ? ' · 호가 단위 ' + esc(m.tickSz) : ''}${m.minNotional ? ' · 최소 명목가 ' + esc(m.minNotional) : ''}${m.listed ? ' · 상장 ' + btT(m.listed) : ''}</li>
     <li>거래소 무기한 선물 가격입니다. 미국 상장 ETF·주식의 실제 가격이 아니며(24시간 거래·펀딩비), ETF 자체의 일일 레버리지·복리 효과와 거래소 레버리지는 다릅니다.</li>
     <li>비용 가정: 수수료 한쪽 ${p.fee}% · 슬리피지 한쪽 ${p.slip}% · 펀딩비 8시간마다 ${p.fund8h}%(가정, 롱이 냄) · 계약 단위 반올림 안 함 · 롱만</li>
-    <li>위험 가정: 초기 ${p.capital} USDT · 거래당 위험 ${p.riskPct}% · 최대 배율 ${p.lev}배 · 손절 ATR×${p.stopAtr} · 목표 ${p.rr}R · 전략 버전 ${esc(r.version)}</li></ul></details>`;
+    <li>위험 가정: 초기 ${p.capital} USDT · 거래당 위험 ${p.riskPct}% · 최대 배율 ${p.lev}배 · 손절 ATR×${p.stopAtr} · 목표 ${p.rr}R${p.trailAtr ? ' · 트레일링 ATR×' + p.trailAtr : ''}${p.timeBars ? ' · 시간 손절 ' + p.timeBars + '봉' : ''}${p.half ? ' · 1R 절반 익절' : ''} · 전략 버전 ${esc(r.version)}</li></ul></details>`;
 }
 function btReport(r, ctx, p) {
   if (r.error) return `<div class="card errbox">${esc(r.name)}: ${esc(r.error)}</div>`;
@@ -177,12 +220,51 @@ function btReport(r, ctx, p) {
         ${r.trades.slice().reverse().map((t) => `<tr><td>${btT(t.entryT)}</td><td>${btNum(t.entry, 4)}</td><td>${btT(t.exitT)}</td><td>${btNum(t.exit, 4)}</td><td>${esc(t.why)}</td><td class="${t.pnl > 0 ? 'up' : 'down'}">${btNum(t.pnl)}</td><td>${btNum(t.R)}</td><td>${t.bars}</td><td>${btNum(t.fee + t.fund)}</td></tr>`).join('')}</tbody></table></div></details>
       ${btAssume(r, ctx, p)}</div>`;
 }
+// 전략 비교: 큰 글씨 카드 + 규칙 기반 순위(표본 수·최대 낙폭·시험 구간·워크포워드) + 짧은 전문가 코멘트
+function btRank(r) {
+  const s = r.stats, test = r.segs[2] ? r.segs[2].ret : 0, oos = r.wf ? r.wf.oos.netPct : null;
+  const warn = [];
+  if (s.n < 10) warn.push(`거래 ${s.n}번뿐(우연일 수 있음)`);
+  if (r.wf && r.wf.avgTrain != null && r.wf.avgTest != null && r.wf.avgTrain - r.wf.avgTest > 3) warn.push('학습 ≫ 시험(과최적화 신호)');
+  if (s.mdd <= -20) warn.push(`낙폭 ${s.mdd.toFixed(0)}%`);
+  // 점수: 처음 보는 데이터 성과(워크포워드·테스트 구간)에 무게, 낙폭은 깎고, 표본이 적으면 크게 깎음
+  let score = s.netPct * 0.3 + test * 0.3 + (oos != null ? oos * 0.4 : test * 0.2) + s.mdd * 0.5 + (s.pf != null && s.pf > 1 ? 2 : -2);
+  if (s.n < 10) score -= 10;
+  return { score, warn, oos, test };
+}
 function btCompare(res, ctx, p) {
   const ok = res.filter((r) => !r.error);
-  return `<div class="card"><h2>전략 비교 <span class="muted">${esc(p.base)} · ${BT_TF[p.tf].label} · 같은 데이터·비용·자본</span></h2>
-    <div class="tblwrap"><table class="md"><thead><tr><th>전략</th><th>순수익률</th><th>MDD</th><th>거래</th><th>승률</th><th>PF</th><th>Sharpe</th><th>테스트 구간</th></tr></thead><tbody>
-      ${res.map((r) => r.error ? `<tr><td>${esc(r.name)}</td><td colspan="7" class="muted">${esc(r.error)}</td></tr>` : `<tr><td>${esc(r.name)}</td><td class="${r.stats.netPct > 0 ? 'up' : 'down'}">${btPct(r.stats.netPct)}</td><td>${btPct(r.stats.mdd)}</td><td>${r.stats.n}</td><td>${r.stats.winRate != null ? r.stats.winRate.toFixed(0) + '%' : '-'}</td><td>${btNum(r.stats.pf)}</td><td>${btNum(r.stats.sharpe)}</td><td class="${r.segs[2] && r.segs[2].ret > 0 ? 'up' : 'down'}">${r.segs[2] ? btPct(r.segs[2].ret) : '-'}</td></tr>`).join('')}</tbody></table></div>
-    <div class="muted" style="font-size:12px;margin-top:6px">순위를 매기지 않습니다. 거래 수가 적으면(예: 10번 미만) 우연일 수 있고, 여러 전략 중 가장 좋은 것을 고르는 것 자체가 과최적화 위험입니다. 자세히 보려면 전략을 하나 골라 실행하세요.</div>
+  ok.forEach((r) => { r.rk = btRank(r); });
+  const ranked = ok.slice().sort((x, y) => y.rk.score - x.rk.score);
+  const medal = ['🥇', '🥈', '🥉'];
+  const big = (v, cls) => `<b class="${cls || ''}" style="font-size:17px">${v}</b>`;
+  const card = (r, i) => {
+    const s = r.stats, k = r.rk;
+    return `<div class="card" style="margin:8px 0 0;padding:10px 12px;${i === 0 && k.score > 0 && s.n >= 10 ? 'border:2px solid #E8A317' : ''}">
+      <div class="row spread"><b style="font-size:15px">${medal[i] || (i + 1) + '위'} ${esc(r.name)}</b><span class="muted" style="font-size:12px">점수 ${k.score.toFixed(1)}</span></div>
+      <div class="grid2" style="font-size:13px;margin-top:6px;row-gap:4px">
+        <div>순수익률<br>${big(btPct(s.netPct), s.netPct > 0 ? 'up' : 'down')}</div><div>최대 낙폭<br>${big(btPct(s.mdd), 'down')}</div>
+        <div>거래 · 승률<br>${big(s.n + '번')} · ${s.winRate != null ? s.winRate.toFixed(0) + '%' : '-'}</div><div>PF · 평균 R<br>${big(btNum(s.pf))} · ${btNum(s.avgR)}</div>
+        <div>테스트 구간(마지막 20%)<br>${big(btPct(k.test), k.test > 0 ? 'up' : 'down')}</div><div>워크포워드 시험<br>${k.oos != null ? big(btPct(k.oos), k.oos > 0 ? 'up' : 'down') : `<span class="muted">${esc(r.wfErr || '-')}</span>`}</div></div>
+      ${k.warn.length ? `<div style="font-size:12px;color:#B26B00;margin-top:4px">⚠️ ${k.warn.map(esc).join(' · ')}</div>` : ''}</div>`;
+  };
+  // 전문가 코멘트(규칙으로 만든 문장)
+  const top = ranked[0], good = ranked.filter((r) => r.stats.n >= 10 && r.stats.netPct > 0 && r.rk.test > 0 && (r.rk.oos == null || r.rk.oos > 0));
+  const allBad = ok.length && ok.every((r) => r.stats.netPct <= 0);
+  const C = [];
+  if (!ok.length) C.push('계산된 전략이 없습니다.');
+  else if (allBad) C.push(`모든 전략이 비용을 빼면 손실입니다. 이 상품·${BT_TF[p.tf].label}·기간에서는 <b>쉬는 것(매매하지 않음)</b>이 가장 나은 선택일 수 있습니다. 봉 단위나 상품을 바꿔 다시 비교해 보세요.`);
+  else if (good.length) C.push(`<b>${esc(good[0].name)}</b>이(가) 전체 기간·마지막 20%·워크포워드 시험에서 모두 플러스입니다(${good[0].stats.n}번 거래, 최대 낙폭 ${btPct(good[0].stats.mdd)}). 그래도 바로 실전이 아니라 <b>모의매매로 몇 주 더 확인</b>하는 단계가 맞습니다.`);
+  else C.push(`1위 <b>${esc(top.name)}</b>도 처음 보는 구간(테스트·워크포워드)에서 안정적이지 않습니다. 순위는 상대 비교일 뿐 '쓸 만하다'는 뜻이 아닙니다.`);
+  if (ok.some((r) => r.stats.n < 10)) C.push('거래가 10번 안 되는 전략은 점수에서 크게 깎았습니다 — 표본이 적으면 운이 결과를 좌우합니다.');
+  if (ok.some((r) => r.rk.warn.some((w) => w.startsWith('학습')))) C.push('학습 구간만 좋고 시험 구간이 나쁜 전략은 과거에 맞춘 결과(과최적화)일 가능성이 큽니다.');
+  C.push(`전략 ${ok.length}개를 한꺼번에 비교했으므로, 1위가 우연히 좋아 보일 확률도 그만큼 큽니다. 손절·목표 설정을 바꿔 가며 1위를 '만드는' 것은 피하세요.`);
+  return `<div class="card"><h2>전략 비교 · 순위 <span class="muted">${esc(p.base)} · ${BT_TF[p.tf].label} · 최근 ${btSpan(p.bars, p.tf)}</span></h2>
+    <div class="muted" style="font-size:12px">같은 데이터·비용·자본으로 계산했습니다. 점수 = 처음 보는 구간(워크포워드 40%·마지막 20% 30%)과 전체 수익(30%)에 무게, 최대 낙폭은 깎고, 거래 10번 미만은 크게 깎음.</div>
+    ${ranked.map(card).join('')}
+    ${res.filter((r) => r.error).map((r) => `<div class="muted" style="font-size:12px;margin-top:6px">${esc(r.name)}: ${esc(r.error)}</div>`).join('')}
+    <div class="card" style="margin:10px 0 0;background:rgba(122,76,209,.08);border:1px solid #7A4CD1"><b>🧑‍💼 전문가 코멘트</b><ul class="steps" style="font-size:14px;margin-top:6px;line-height:1.6">${C.map((t) => `<li>${t}</li>`).join('')}</ul>
+      <div class="muted" style="font-size:11px">규칙으로 만든 문장입니다(AI 아님). 공부용 · 매매 권유 아님.</div></div>
     ${ok[0] ? btAssume(ok[0], ctx, p) : ''}</div>`;
 }
 // 자산 곡선 + 낙폭
