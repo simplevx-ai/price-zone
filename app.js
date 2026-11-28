@@ -1,13 +1,13 @@
 /* AI 마켓 스캐너(옛 이름 가격 위치) — 국내주식·해외주식·코인·코인선물·해외선물 매수 검토 구간 공부용 앱
  * - 시세 출처: sources.js (모두 '조회'만, 주문·계좌 기능 없음)
  * - 구간 계산: zones.js (앱 안에서 계산)
- * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 현재가를 보고 구간에 들어오면 텔레그램·디스코드로 알림.
+ * - 알림: 구간을 내 구글 Apps Script에 저장 → 스크립트가 현재가를 보고 구간에 들어오면 디스코드로 알림.
  *   봇 토큰·웹훅·Alpha Vantage·한국투자증권 키는 스크립트 속성에만 있고 폰에는 없다.
  * 매수 추천이 아니라 가격 위치를 공부하기 위한 도구다.
  */
 'use strict';
 
-const APP_VERSION = '3.8.1';
+const APP_VERSION = '3.9.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -176,11 +176,11 @@ async function viewList() {
       <div id="mk"></div><div id="xkrf"></div><div id="xetf"></div><div id="xecon"></div>
       ${catChips(sel, true)}
       <div class="row spread" style="margin:2px 0 6px"><span class="muted" style="font-size:12px">${L.length}종목</span><button class="btn small${edit ? ' primary' : ''}" id="wedit" type="button">${edit ? '✓ 편집 끝' : '✏️ 편집(빼기)'}</button></div>
-      <div id="ls">${L.map((w) => edit ? `<div class="coin row spread" data-id="${esc(idOf(w))}"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)}${w.alert ? ' 🔔' : ''}</span><button class="btn small danger" type="button" data-rm="${esc(w.cat)}|${esc(w.sym)}">🗑 빼기</button></div>` : `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
+      <div id="ls">${L.map((w) => edit ? `<div class="coin row spread" data-id="${esc(idOf(w))}"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)}${w.alert ? ' 🔔' : ''}</span><button class="btn small danger" type="button" data-rm="${esc(w.cat)}|${esc(w.sym)}">🗑 빼기</button></div>` : `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.cat === 'ffut' && FF.front(w.sym) ? FF.front(w.sym).main.code + ' · OKX ' + FF.info(w.sym).okx : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
       <a class="btn block" href="#/add">+ 종목 추가</a>
       ${(await KV.get('lowVolGone', [])).length ? `<details class="card" style="margin-top:10px"><summary class="muted" style="font-size:13px">거래가 적어 자동으로 뺀 종목</summary><div class="muted" style="font-size:12px;margin-top:4px">${(await KV.get('lowVolGone', [])).slice(0, 10).map((x) => `${esc(x.name)}(${esc(x.why)}, ${new Date(x.at).toLocaleDateString('ko-KR')})`).join(' · ')}</div></details>` : ''}
       <div class="muted" style="font-size:11px;margin-top:6px">코인은 하루 거래 10억 원, 코인선물은 100만 USDT보다 적으면 관심 종목에서 자동으로 뺍니다(비트코인·비트코인 선물·나스닥 선물·테더는 제외).</div>
-      <div class="disc">시세: 업비트·빗썸·바이낸스·OKX·바이비트(공개) · Alpha Vantage · 공공데이터포털 · 한국투자증권 · v${APP_VERSION}</div>`;
+      <div class="disc">시세: 업비트·빗썸·바이낸스·OKX·바이비트(공개) · Alpha Vantage · 네이버 증권(국내주식) · 해외선물은 한투 키 전까지 OKX로 대신 · v${APP_VERSION}</div>`;
     if (sel === 'all' || sel === 'coin' || sel === 'cfut') etfCard($('#xetf')).catch(() => {});
     if (sel !== 'coin') econCard($('#xecon')).catch(() => {});
     if ((sel === 'all' || sel === 'kr') && watch.some((x) => x.cat === 'kr')) krWatchFlows($('#xkrf'), watch.filter((x) => x.cat === 'kr')).catch(() => {});
@@ -241,7 +241,7 @@ async function viewAdd() {
     const c = CATS[cat];
     const nm = await needMsg(cat);
     const remote = cat === 'us' || cat === 'kr'; // 입력해야 찾는(스크립트 경유) 카테고리
-    const manual = cat === 'ffut' || (cat === 'kr' && (nm || ((await krSource()) === 'kis' && !(await KV.get('relayStatus', {})).naver)));
+    const manual = cat === 'kr' && !!nm; // 스크립트 연결 전에는 국내주식 코드를 직접(해외선물은 목록에서 고름)
     view().innerHTML = `${catChips(cat, false)}
       ${nm ? `<div class="card warnlist" style="margin-top:0">🔑 ${esc(nm)}. 종목은 미리 추가해 둘 수 있습니다. <a href="#/settings">설정 ›</a></div>` : ''}
       <div class="card">${manual ? `
@@ -249,7 +249,7 @@ async function viewAdd() {
         ${cat === 'ffut' ? '<label for="m_ex">거래소</label><input id="m_ex" placeholder="CME" autocomplete="off">' : ''}
         <label for="m_name">이름</label><input id="m_name" placeholder="${cat === 'kr' ? '삼성전자' : '나스닥100 12월물'}">
         <button class="btn primary block" id="m_add" type="button" style="margin-top:10px">추가</button>
-        <div class="muted" style="font-size:12px;margin-top:6px">${cat === 'kr' ? (nm ? '스크립트 연결 전이라 코드를 직접 넣습니다. 공공데이터 서비스키를 넣으면 이름으로 찾을 수 있습니다.' : '한국투자증권 API에는 이름 검색이 없어 코드를 직접 넣습니다.') : `해외선물은 월물마다 코드가 바뀝니다(예: 지금 나스닥100 주력 월물 = ${nqCme().main.code}, NQZ25는 2025-12-19 만기로 끝남). 만기가 지나면 다음 월물로 다시 추가하세요.`}</div>`
+        <div class="muted" style="font-size:12px;margin-top:6px">${cat === 'kr' ? (nm ? '스크립트 연결 전이라 코드를 직접 넣습니다. 설정에서 스크립트를 연결하면 이름으로 찾을 수 있습니다(네이버).' : '한국투자증권 API에는 이름 검색이 없어 코드를 직접 넣습니다.') : `해외선물은 월물마다 코드가 바뀝니다(예: 지금 나스닥100 주력 월물 = ${nqCme().main.code}, NQZ25는 2025-12-19 만기로 끝남). 만기가 지나면 다음 월물로 다시 추가하세요.`}</div>`
       : `<input id="q" placeholder="${esc(c.hint || '이름이나 기호')}" autocomplete="off"><div class="pick" id="pk"><div class="muted" style="padding:10px">${remote ? '이름이나 코드를 입력하세요' : '불러오는 중…'}</div></div>`}</div>`;
     view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { cat = b.dataset.cat; sessionStorage.setItem('pzAddCat', cat); draw(); }; });
     if (manual) {
@@ -286,7 +286,7 @@ async function viewAsset(cat, sym) {
   const watch = await getWatch();
   const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym, tf: defTf(cat) };
   const inList = watch.some((x) => x.cat === cat && x.sym === sym);
-  setTitle(w.name, true);
+  setTitle(cat === 'ffut' ? FF.label(sym, w.name) : w.name, true);
   const tf = CATS[cat].tfs.includes(w.tf) ? w.tf : defTf(cat);
   view().innerHTML = `${CATS[cat].tfs.length > 1 ? `<div class="seg" role="radiogroup" aria-label="봉 단위">${CATS[cat].tfs.map((k) => `<label><input type="radio" name="tf" value="${k}"${k === tf ? ' checked' : ''}><span>${TFS[k].label}</span></label>`).join('')}</div>` : ''}
     <div class="card" style="margin-top:10px;padding:8px"><canvas class="chart" id="cv" aria-label="가격 차트와 검토 구간"></canvas>
@@ -294,7 +294,7 @@ async function viewAsset(cat, sym) {
     <div id="sum" class="card"><div class="muted">계산 중…</div></div>
     <div id="zs"></div>
     ${`<a class="card coin" href="#/ai/${cat}/${enc(sym)}" style="display:block"><div class="row spread"><b>🤖 AI 분석</b><span>›</span></div><div class="muted" style="font-size:13px;margin-top:4px">📐 규칙 분석(키 없이 바로) · 📋 Claude·ChatGPT에 붙여 넣을 요청문 복사${cat === 'us' ? ' · 🤖 Claude 자동 분석(키 있을 때)' : ''} — 공부용</div></a>`}
-    <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
+    <div class="card"><div class="row spread"><b>🔔 알림 (디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
     <div id="xpa"></div><div id="xmtf"></div>${cat === 'us' || cat === 'kr' ? '<div id="xearn"></div>' : ''}
@@ -317,7 +317,7 @@ async function viewAsset(cat, sym) {
   let cs;
   try { cs = await candles(w, tf); } catch (e) { if (!live()) return; $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`; return; }
   if (!live()) return;
-  { const PK = { coin: 'coin', cfut: 'cfut', us: 'us', kr: 'kr' }[cat]; if (PK) paCard($('#xpa'), { app: 'pz', kind: PK, sym, name: w.name, last: cs[cs.length - 1].c }).catch(() => {});
+  { const PK = { coin: 'coin', cfut: 'cfut', us: 'us', kr: 'kr', ffut: 'okx' }[cat]; if (PK) paCard($('#xpa'), { app: 'pz', kind: PK, sym: cat === 'ffut' ? (FF.info(sym) || {}).okx || sym : sym, name: cat === 'ffut' ? FF.label(sym, w.name) + ' (OKX 가격)' : w.name, last: cs[cs.length - 1].c }).catch(() => {});
     mtfCard($('#xmtf'), CATS[cat].tfs.map((k) => [k, TFS[k].label.replace('봉', '')]), async (k) => candles(w, k)).catch(() => {});
     if (cat === 'us' || cat === 'kr') earnCard($('#xearn'), w).catch(() => {}); }
   const r = ZoneMath.analyze(cs, { tf });
@@ -434,8 +434,8 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, naver: !!d.naver, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null, scan: d.scan || null });
-      res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 9 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — ETF 아침 정리·나스닥 신호 알림·AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, naver: !!d.naver, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null, scan: d.scan || null });
+      res(`<div class="${d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.discord ? '✅' : '⚠️'} 연결됨 · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 9 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — ETF 아침 정리·나스닥 신호 알림·AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };

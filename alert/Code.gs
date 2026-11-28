@@ -1,7 +1,7 @@
 /**
  * 가격 위치 앱 — 알림·시세 중계 스크립트 (Google Apps Script 웹 앱 + 10분 자동 확인)
  *
- * 1) 앱이 계산한 '검토 구간'을 저장해 두고, 현재가가 구간에 '들어올 때' 텔레그램·디스코드로 알린다.
+ * 1) 앱이 계산한 '검토 구간'을 저장해 두고, 현재가가 구간에 '들어올 때' 디스코드로 알린다(텔레그램은 v21에서 삭제).
  * 2) 키가 필요한 시세(해외주식 Alpha Vantage, 국내주식·해외선물 한국투자증권)를 앱 대신 받아 준다(키는 여기만 보관).
  * 3) 업비트는 브라우저 직접 요청이 10초 1회로 막혀 있어 앱 대신 받아 준다.
  * 4) 매일 14시(한국 시간) 이후 한 번, 앱을 열지 않아도 알림 종목의 검토 구간을 스스로 다시 계산한다(앱과 같은 계산식).
@@ -12,14 +12,12 @@
  *
  * ── 스크립트 속성(프로젝트 설정 → 스크립트 속성)에 직접 넣을 값 ──
  *   APP_KEY              앱과 이 스크립트만 아는 암호(아무 긴 문자열). 앱 설정에도 같은 값   ← 꼭 필요
- *   TELEGRAM_BOT_TOKEN   텔레그램 봇 토큰           ┐ 텔레그램 알림을 쓸 때
- *   TELEGRAM_CHAT_ID     알림 받을 채팅 ID(숫자)    ┘
- *   DISCORD_WEBHOOK_URL  디스코드 채널 웹훅 주소     — 디스코드 알림을 쓸 때
+ *   DISCORD_WEBHOOK_URL  디스코드 채널 웹훅 주소     ← 알림은 디스코드로만 보냄
  *   ALPHAVANTAGE_API_KEY Alpha Vantage 키           — 해외주식을 볼 때
- *   KIS_APP_KEY          한국투자증권 앱키          ┐ 국내주식·해외선물을 볼 때
+ *   KIS_APP_KEY          한국투자증권 앱키          ┐ 해외선물 CME 실제 월물(없으면 OKX로 대신) · 국내주식 예비
  *   KIS_APP_SECRET       한국투자증권 앱시크릿      ┘
  *   KIS_ENV              real(실전, 기본) 또는 demo(모의투자)
- *   DATA_GO_KR_KEY       공공데이터포털 '금융위원회_주식시세정보' 서비스키 — 국내주식(한투 없이, 하루 1번 갱신)
+ *   DATA_GO_KR_KEY       공공데이터포털 '금융위원회_주식시세정보' 서비스키 — 국내주식 예비(국내주식은 항상 네이버 먼저)
  *   SOSO_API_KEY         SoSoValue 무료 API 키 — 코인 ETF 입출금(선택, v18)
  *   ANTHROPIC_API_KEY    Claude API 키 — 🤖 AI 분석(종목 1개에 약 13번 호출, 모델 claude-opus-5-5)
  *   AI_DAILY_CALLS       (선택) 하루 AI 호출 한도, 비우면 130번(약 10종목)
@@ -27,7 +25,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 20;
+const VERSION = 21;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -42,7 +40,7 @@ function doPost(e) {
     const appKey = (P.getProperty('APP_KEY') || '').trim();
     if (!appKey || d.key !== appKey) return json_({ ok: false, error: 'denied' });
     if (d.action === 'ping') {
-      return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
+      return json_({ ok: true, version: VERSION, discord: !!discordUrl_(),
         av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null,
         naver: true, liq: liqStatus_(), soso: !!P.getProperty('SOSO_API_KEY'), ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_(), coinStrong: coinStrongStatus_() });
     }
@@ -130,18 +128,23 @@ function 가격확인() {
     });
     P.setProperty('LAST_US', String(now));
   }
-  // 국내주식: 공공데이터(전 영업일 종가, 한투 키가 없을 때)
-  if (!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'))) {
+  // 국내주식: 항상 네이버 먼저(2026-11-28 사용자 결정) — 빠진 종목만 아래에서 한투 → 공공데이터
+  {
     const krs = items.filter((x) => x.cat === 'kr');
-    if (krs.length) { try { const q = naverQuotes_(krs.map((x) => x.sym)); krs.forEach((x) => { if (q[x.sym]) { price['kr:' + x.sym] = q[x.sym].price; srcOf['kr:' + x.sym] = '네이버'; } }); } catch (e) { /* 공공데이터로 */ } }
+    if (krs.length) { try { const q = naverQuotes_(krs.map((x) => x.sym)); krs.forEach((x) => { if (q[x.sym]) { price['kr:' + x.sym] = q[x.sym].price; srcOf['kr:' + x.sym] = '네이버'; } }); } catch (e) { /* 예비로 */ } }
+  }
+  // 해외선물: 한투 키 전까지 OKX 같은 기초자산 무기한(뿌리 기호 → FF.okxId)
+  {
+    const ffs = items.filter((x) => x.cat === 'ffut' && FF.info(x.sym));
+    if (ffs.length) { try { const m = {}; okx_('/market/tickers?instType=SWAP').forEach((t) => { m[t.instId] = +t.last; }); ffs.forEach((x) => { const p = m[FF.okxId(x.sym)]; if (p) { price['ffut:' + x.sym] = p; srcOf['ffut:' + x.sym] = 'OKX ' + FF.info(x.sym).okx; } }); } catch (e) { /* 다음에 */ } }
   }
   if (P.getProperty('DATA_GO_KR_KEY') && !(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'))) {
     items.filter((x) => x.cat === 'kr' && !price['kr:' + x.sym]).forEach((x) => { try { const cs = krxCandlesCached_(x.sym); if (cs.length) price['kr:' + x.sym] = cs[cs.length - 1].c; } catch (e) { /* 다음에 */ } });
   }
   // 국내주식·해외선물: 한국투자증권
   if (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')) {
-    items.filter((x) => x.cat === 'kr').forEach((x) => { try { const o = kisGet_('/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: x.sym }); const p = Number(o.output && o.output.stck_prpr); if (p) price['kr:' + x.sym] = p; } catch (e) { /* 다음에 */ } });
-    items.filter((x) => x.cat === 'ffut').forEach((x) => { try { const cs = ffCandles_(x.sym, x.ex, 1); if (cs.length) price['ffut:' + x.sym] = cs[cs.length - 1].c; } catch (e) { /* 다음에 */ } });
+    items.filter((x) => x.cat === 'kr' && !price['kr:' + x.sym]).forEach((x) => { try { const o = kisGet_('/uapi/domestic-stock/v1/quotations/inquire-price', 'FHKST01010100', { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: x.sym }); const p = Number(o.output && o.output.stck_prpr); if (p) price['kr:' + x.sym] = p; } catch (e) { /* 다음에 */ } });
+    items.filter((x) => x.cat === 'ffut' && FF.info(x.sym)).forEach((x) => { try { const cs = ffCandles_(FF.front(x.sym).main.code, FF.info(x.sym).ex, 1); if (cs.length) { price['ffut:' + x.sym] = cs[cs.length - 1].c; srcOf['ffut:' + x.sym] = '한국투자증권 ' + FF.front(x.sym).main.code; } } catch (e) { /* OKX 값 유지 */ } });
   }
   const zid = (x, z) => x.cat + ':' + x.sym + '|' + z.low.toPrecision(8) + '|' + z.high.toPrecision(8);
   const state = JSON.parse(readWatchRaw_('STATE'));
@@ -172,7 +175,7 @@ function 가격확인() {
   if (recalcDue_()) { try { 구간재계산_(false); } catch (e) { /* 다음 10분에 다시 */ } }
 }
 
-// 구간 진입 알림 글(디스코드 마크다운: ## 제목, **굵게**, > 인용, -# 작은 글씨 — 텔레그램은 send_에서 기호를 지움)
+// 구간 진입 알림 글(디스코드 마크다운: ## 제목, **굵게**, > 인용, -# 작은 글씨)
 function zoneAlertText_(x, z, i, p, unit, src) {
   const A = Number(x.atr) || 0, L = [];
   const gIcon = z.grade === '강' ? '🟢' : z.grade === '중' ? '🟡' : z.grade ? '⚪' : '';
@@ -628,13 +631,17 @@ function serverCandles0_(x) {
   }
   const P = PropertiesService.getScriptProperties(), kis = !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'));
   if (x.cat === 'kr') {
-    if (kis) return krCandles_(x.sym, tf === 'week' ? 'W' : 'D');
-    try { const nc = naverCandles_(x.sym, 730); if (nc.length >= 60) { const o = tf === 'week' ? toWeekly_(nc) : nc; o.src = '네이버'; return o; } } catch (e) { /* 공공데이터로 */ }
-    if (!P.getProperty('DATA_GO_KR_KEY')) throw new Error('네이버 봉을 못 받았고 DATA_GO_KR_KEY도 없음');
+    try { const nc = naverCandles_(x.sym, 730); if (nc.length >= 60) { const o = tf === 'week' ? toWeekly_(nc) : nc; o.src = '네이버'; return o; } } catch (e) { /* 예비로 */ }
+    if (kis) { try { const kc = krCandles_(x.sym, tf === 'week' ? 'W' : 'D'); if (kc.length) return kc; } catch (e) { /* 공공데이터로 */ } }
+    if (!P.getProperty('DATA_GO_KR_KEY')) throw new Error('네이버 봉을 못 받았고 예비(한투·공공데이터)도 없음');
     const cs = krxCandlesCached_(x.sym);
     return tf === 'week' ? toWeekly_(cs) : cs;
   }
-  if (x.cat === 'ffut') { if (!kis) throw new Error('한국투자증권 키 없음'); return ffCandles_(x.sym, x.ex, 3); }
+  if (x.cat === 'ffut') {
+    const r = FF.info(x.sym); if (!r) throw new Error(x.sym + ': 아는 해외선물 기호가 아님');
+    if (kis && tf === 'day') { try { const cs = ffCandles_(FF.front(x.sym).main.code, r.ex, 3); if (cs.length >= 30) return cs; } catch (e) { /* OKX로 */ } }
+    const cs = perpCandles_(r.okx, tf); cs.src = 'OKX ' + r.okx + ' 무기한(' + FF.front(x.sym).main.code + ' 대신)'; return cs;
+  }
   throw new Error('알 수 없는 카테고리');
 }
 // 일봉 → 주봉(월요일 시작, 한국 시간) — 앱 sources.js toWeekly와 같음
@@ -1264,6 +1271,77 @@ const LV = (() => {
   return { profile, swings, levels, buyZone, sellZone, divergence, strong, fixSplits };
 })();
 /* ==== levels.js 끝 ==== */
+/* ==== ffut.js 시작 (alert/build.mjs가 앱 ffut.js를 그대로 복사 — 여기서 고치지 말 것) ==== */
+// 해외선물 공통(앱·알림 스크립트 같이 씀 — alert/build.mjs가 Code.gs에 복사)
+// - 종목은 '뿌리 기호'(NQ·ES·GC…)로 저장 → 주력 월물 코드(NQZ26 등)는 날짜로 자동 계산, 월물이 바뀌면 저절로 다음 월물
+// - 한국투자증권 키가 생기기 전까지는 OKX의 같은 기초자산 무기한 선물 가격으로 대신 봄(CME 가격과 조금 다름)
+// - 만기·롤오버 날짜는 거래소 규칙을 단순화한 '추정'(공휴일은 따지지 않음)
+var FF = (function () {
+  var L = 'FGHJKMNQUVXZ'; // 1~12월 월물 글자
+  var Q = [3, 6, 9, 12];
+  // 셋째 금요일 13:30 UTC(미국 지수 선물 만기)
+  function third(y, m) { var d = new Date(Date.UTC(y, m - 1, 1)); var add = (5 - d.getUTCDay() + 7) % 7; return new Date(Date.UTC(y, m - 1, 1 + add + 14, 13, 30)); }
+  // 달 계산(m은 1~12, 넘치면 해를 넘김)
+  function day(y, m, d) { return new Date(Date.UTC(y, m - 1, d, 18)); }
+  var IDX = { months: Q, exp: third, roll: function (e) { return new Date(e.getTime() - 8 * 86400e3); } };
+  // 원유: 인도 월 전달 20일쯤 만기 · 천연가스: 전달 26일쯤 · 브렌트: 두 달 전 말일쯤
+  var CLR = { months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], exp: function (y, m) { return day(y, m - 1, 20); }, roll: function (e) { return new Date(e.getTime() - 5 * 86400e3); } };
+  var NGR = { months: CLR.months, exp: function (y, m) { return day(y, m - 1, 26); }, roll: CLR.roll };
+  var BZR = { months: CLR.months, exp: function (y, m) { return day(y, m - 1, 0); }, roll: CLR.roll };
+  // 금속: 거래가 전달 말(첫 통지일) 전에 다음 월물로 옮겨 감 → 전달 25일쯤 롤오버, 만기는 그 달 27일쯤
+  function metal(ms) { return { months: ms, exp: function (y, m) { return day(y, m, 27); }, roll: function (e, y, m) { return day(y, m - 1, 25); } }; }
+  // 미국 국채: 전달 말 첫 통지일 전 롤오버
+  var BOND = { months: Q, exp: function (y, m) { return day(y, m, 20); }, roll: function (e, y, m) { return day(y, m - 1, 24); } };
+  var ROOTS = {
+    NQ: { name: '나스닥100 선물', ex: 'CME', okx: 'US100', sch: IDX, pt: '1포인트 $20' },
+    MNQ: { name: '마이크로 나스닥100 선물', ex: 'CME', okx: 'US100', sch: IDX, pt: '1포인트 $2' },
+    ES: { name: 'S&P500 선물', ex: 'CME', okx: 'US500', sch: IDX, pt: '1포인트 $50' },
+    MES: { name: '마이크로 S&P500 선물', ex: 'CME', okx: 'US500', sch: IDX, pt: '1포인트 $5' },
+    RTY: { name: '러셀2000 선물', ex: 'CME', okx: 'IWM', sch: IDX, etf: true, pt: '1포인트 $50' },
+    NKD: { name: '니케이225 선물(달러)', ex: 'CME', okx: 'JP225', sch: IDX, pt: '1포인트 $5' },
+    CL: { name: 'WTI 원유 선물', ex: 'NYMEX', okx: 'CL', sch: CLR, pt: '1달러 $1,000' },
+    MCL: { name: '마이크로 WTI 원유 선물', ex: 'NYMEX', okx: 'CL', sch: CLR, pt: '1달러 $100' },
+    BZ: { name: '브렌트유 선물', ex: 'NYMEX', okx: 'BZ', sch: BZR, pt: '1달러 $1,000' },
+    NG: { name: '천연가스 선물', ex: 'NYMEX', okx: 'NG', sch: NGR, pt: '0.001달러 $10' },
+    GC: { name: '금 선물', ex: 'COMEX', okx: 'XAU', sch: metal([2, 4, 6, 8, 10, 12]), pt: '1달러 $100' },
+    MGC: { name: '마이크로 금 선물', ex: 'COMEX', okx: 'XAU', sch: metal([2, 4, 6, 8, 10, 12]), pt: '1달러 $10' },
+    SI: { name: '은 선물', ex: 'COMEX', okx: 'XAG', sch: metal([3, 5, 7, 9, 12]), pt: '0.005달러 $25' },
+    HG: { name: '구리 선물', ex: 'COMEX', okx: 'XCU', sch: metal([3, 5, 7, 9, 12]), pt: '0.0005달러 $12.5' },
+    PL: { name: '백금 선물', ex: 'NYMEX', okx: 'XPT', sch: metal([1, 4, 7, 10]), pt: '1달러 $50' },
+    PA: { name: '팔라듐 선물', ex: 'NYMEX', okx: 'XPD', sch: metal([3, 6, 9, 12]), pt: '1달러 $100' },
+    ZN: { name: '미국 10년 국채 선물', ex: 'CBOT', okx: 'TLT', sch: BOND, etf: true, pt: '1포인트 $1,000' },
+    ZB: { name: '미국 30년 국채 선물', ex: 'CBOT', okx: 'TLT', sch: BOND, etf: true, pt: '1포인트 $1,000' },
+  };
+  // 'NQZ25'·'NQZ2025'·'nq' → 'NQ' (예전에 월물 코드로 저장한 종목도 뿌리로 읽음)
+  function root(sym) {
+    var s = String(sym || '').toUpperCase().trim();
+    if (ROOTS[s]) return s;
+    var m = s.match(/^([A-Z]{1,3})[FGHJKMNQUVXZ]\d{1,4}$/);
+    return m && ROOTS[m[1]] ? m[1] : s;
+  }
+  // 주력 월물: 롤오버 날이 지나면 다음 월물
+  function front(sym, now) {
+    now = now || new Date();
+    var r = ROOTS[root(sym)]; if (!r) return null;
+    var list = [], y0 = now.getUTCFullYear();
+    for (var y = y0; y <= y0 + 2; y++) r.sch.months.forEach(function (m) {
+      var e = r.sch.exp(y, m);
+      list.push({ code: root(sym) + L[m - 1] + String(y).slice(2), y: y, mm: m, exp: e, roll: r.sch.roll(e, y, m) });
+    });
+    list.sort(function (a, b) { return a.exp - b.exp; });
+    var act = list.filter(function (x) { return x.exp > now; });
+    var i = act[0].roll <= now ? 1 : 0;
+    return { main: act[i], next: act[i + 1], front: act[0], rolled: i === 1, daysToRoll: Math.ceil((act[i].roll - now) / 86400e3), daysToExp: Math.ceil((act[0].exp - now) / 86400e3) };
+  }
+  function info(sym) { return ROOTS[root(sym)] || null; }
+  function okxId(sym) { var r = info(sym); return r ? r.okx + '-USDT-SWAP' : ''; }
+  // 화면 이름: '나스닥100 선물 NQZ26'
+  function label(sym, name) { var f = front(sym); var r = info(sym); return (name || (r ? r.name : sym)) + (f ? ' ' + f.main.code : ''); }
+  function list() { return Object.keys(ROOTS).map(function (k) { return { sym: k, name: ROOTS[k].name, r: ROOTS[k] }; }); }
+  return { ROOTS: ROOTS, root: root, front: front, info: info, okxId: okxId, label: label, list: list };
+})();
+if (typeof module !== 'undefined') module.exports = FF;
+/* ==== ffut.js 끝 ==== */
 
 /* ==== nq.js 시작 (앱과 같은 신호 계산 — alert/build.mjs가 ../nq.js에서 그대로 복사, 직접 고치지 말 것) ==== */
 /* 가격 위치 — 📡 나스닥 신호 엔진 (OKX QQQ·TQQQ·SQQQ 무기한 선물, 공부용 규칙 신호)
@@ -1928,7 +2006,7 @@ function 알림끄기() {
 /** 편집기에서 실행해 설정 확인(키·토큰 값은 찍지 않음) */
 function 설정확인() {
   const P = PropertiesService.getScriptProperties();
-  Logger.log('텔레그램 봇 토큰: ' + (P.getProperty('TELEGRAM_BOT_TOKEN') ? '있음' : '없음') + ' / 채팅 ID: ' + (P.getProperty('TELEGRAM_CHAT_ID') ? '있음' : '없음') + ' / 디스코드 웹훅: ' + (discordUrl_() ? '있음' : (P.getProperty('DISCORD_WEBHOOK_URL') ? '모양이 틀림' : '없음')) + ' / APP_KEY: ' + (P.getProperty('APP_KEY') ? '있음' : '없음') + ' / 자동 확인: ' + (hasTrigger_() ? '켜짐' : '꺼짐') + ' / 알림 종목: ' + watch_().length);
+  Logger.log('디스코드 웹훅: ' + (discordUrl_() ? '있음' : (P.getProperty('DISCORD_WEBHOOK_URL') ? '모양이 틀림' : '없음')) + ' / APP_KEY: ' + (P.getProperty('APP_KEY') ? '있음' : '없음') + ' / 자동 확인: ' + (hasTrigger_() ? '켜짐' : '꺼짐') + ' / 알림 종목: ' + watch_().length);
   Logger.log('Alpha Vantage 키: ' + (P.getProperty('ALPHAVANTAGE_API_KEY') ? '있음' : '없음') + ' / 공공데이터 키: ' + (P.getProperty('DATA_GO_KR_KEY') ? '있음' : '없음') + ' / 한국투자증권 키: ' + (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET') ? '있음' : '없음') + ' (' + (P.getProperty('KIS_ENV') || 'real') + ')');
   const rc = watchMeta_().recalc;
   Logger.log('구간 자동 재계산(매일 ' + RECALC_HOUR + '시 이후): ' + (rc ? '마지막 ' + Utilities.formatDate(new Date(rc.at), 'Asia/Seoul', 'M/d HH:mm') + ' · 성공 ' + rc.done + ' · 실패 ' + rc.fail.length + (rc.fail.length ? ' (' + rc.fail.join(' / ') + ')' : '') : '아직 실행 전'));
@@ -1955,7 +2033,7 @@ function 연결점검() {
   line('공공데이터포털 주식시세(국내주식, 키 없이)', () => { const r = UrlFetchApp.fetch(KRX_URL_ + '?serviceKey=TEST&resultType=json&numOfRows=1', { muteHttpExceptions: true }); const t = r.getContentText(); if (!/SERVICE_KEY|등록되지/.test(t)) throw new Error('응답 ' + r.getResponseCode() + ': ' + t.slice(0, 80)); return '서버에 닿음(서비스키를 넣으면 시세 받기 가능)'; });
   line('한국투자증권 서버 접속(포트 9443, 키 없이)', () => { const r = UrlFetchApp.fetch('https://openapi.koreainvestment.com:9443/oauth2/tokenP', { method: 'post', contentType: 'application/json', payload: '{}', muteHttpExceptions: true }); return '응답 ' + r.getResponseCode() + ' — 서버에 닿음(키를 넣으면 토큰 발급 가능)'; });
 }
-/** 텔레그램·디스코드 값을 넣은 뒤 실행: 테스트 알림 한 통 보내기 */
+/** 디스코드 웹훅을 넣은 뒤 실행: 테스트 알림 한 통 보내기 */
 function 테스트알림() { Logger.log(JSON.stringify(send_('✅ 가격 위치 알림 테스트입니다(편집기에서 실행). 이 메시지가 보이면 연결이 잘 된 것입니다.'))); }
 /** ALPHAVANTAGE_API_KEY를 넣은 뒤 실행: 내 키로 AAPL 일봉을 받아 봄(키 값은 찍지 않음) */
 function 해외주식연결확인() {
@@ -1990,20 +2068,12 @@ function watch_() {
   } catch (e) { return []; }
 }
 function hasTrigger_() { return ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === '가격확인'); }
-// 설정된 곳(텔레그램·디스코드) 모두에 보낸다. 한 곳이라도 성공하면 통과, 모두 실패하면 오류
+// 디스코드로만 보낸다(텔레그램은 v21에서 삭제 — 2026-11-28 사용자 결정). opt는 예전 호출과 맞추려고 받기만 함
 function send_(text, opt) {
-  opt = opt || {};
-  const P = PropertiesService.getScriptProperties();
-  const token = (P.getProperty('TELEGRAM_BOT_TOKEN') || '').trim(), chat = (P.getProperty('TELEGRAM_CHAT_ID') || '').trim();
   const hook = discordUrl_();
-  if (!(token && chat) && !hook) throw new Error('스크립트 속성에 텔레그램(TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID) 또는 디스코드(DISCORD_WEBHOOK_URL)가 없습니다');
+  if (!hook) throw new Error('스크립트 속성에 디스코드(DISCORD_WEBHOOK_URL)가 없습니다');
   const done = [], fail = [];
-  if (token && chat && !opt.discordOnly) {
-    const plain = String(text).split('\n').map((l) => l.replace(/^(#{1,3}|-#|>)\s+/, '')).join('\n').replace(/\*\*/g, '');
-    const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/sendMessage', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ chat_id: chat, text: plain, disable_web_page_preview: true }), muteHttpExceptions: true });
-    (r.getResponseCode() === 200 ? done : fail).push('텔레그램' + (r.getResponseCode() === 200 ? '' : '(' + r.getResponseCode() + ')'));
-  }
-  if (hook) {
+  {
     const r = UrlFetchApp.fetch(hook, { method: 'post', contentType: 'application/json', payload: JSON.stringify({ username: '가격 위치', content: text.slice(0, 1990), allowed_mentions: { parse: [] } }), muteHttpExceptions: true });
     const c = r.getResponseCode();
     (c === 200 || c === 204 ? done : fail).push('디스코드' + (c === 200 || c === 204 ? '' : '(' + c + ')'));

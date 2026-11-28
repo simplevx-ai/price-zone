@@ -11,12 +11,13 @@
 'use strict';
 
 const CATS = {
-  kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'krx|kis|naver', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
+  kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'naver', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
   us: { label: '해외주식', icon: '🇺🇸', tfs: ['day', 'week'], unit: '$', needs: 'av', hint: '티커나 한글 이름(예: NVDA, 엔비디아)' },
   // 봉 순서는 앱 전체에서 짧은 것부터: 15분 · 30분 · 1시간 · 4시간 · 일봉 (· 주봉)
   coin: { label: '코인', icon: '🪙', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: '원' },
   cfut: { label: '코인선물', icon: '⚡', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: 'USDT' },
-  ffut: { label: '해외선물', icon: '🌐', tfs: ['day'], unit: '', needs: 'kis', hint: '종목코드+거래소(예: NQZ25, CME)' },
+  // 해외선물: 뿌리 기호(NQ·ES·GC…)로 저장, 주력 월물은 ffut.js가 날짜로 자동 계산. 한투 키 전까지 OKX 같은 기초자산 무기한으로 대신
+  ffut: { label: '해외선물', icon: '🌐', tfs: ['h1', 'h4', 'day'], unit: '$', get hint() { return '이름이나 기호(예: 나스닥, NQ → 지금 ' + FF.front('NQ').main.code + ', 월물은 자동으로 바뀜)'; } },
 };
 const TFS = {
   day: { label: '일봉', name: '일' }, week: { label: '주봉', name: '주' },
@@ -26,10 +27,9 @@ const TFS = {
 const FRESH = { day: 30 * 60e3, week: 6 * 3600e3, h4: 10 * 60e3, h1: 5 * 60e3, m30: 3 * 60e3, m15: 2 * 60e3 };
 // 처음 고르는 봉(목록에서 맨 앞이 15분봉이어도 기본은 일봉)
 const defTf = (cat) => (CATS[cat].tfs.includes('day') ? 'day' : CATS[cat].tfs[0]);
-const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', 'krx|kis': '공공데이터 서비스키(또는 한국투자증권 키)', 'krx|kis|naver': '알림 스크립트 v15(네이버 중계) 또는 한국투자증권 키' };
-// 국내주식 출처: 한투 키가 있으면 한투(장중 시세), 없으면 공공데이터(전 영업일까지)
-// 국내주식 출처: 한국투자증권 키 > 네이버(스크립트 v15, 키 없음·비공식 공개 주소) > 공공데이터(전 영업일 종가)
-async function krSource() { const st = await KV.get('relayStatus', {}); return st.kis ? 'kis' : st.naver ? 'naver' : 'krx'; }
+const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', naver: '알림 스크립트 v15 이상(네이버 중계)' };
+// 국내주식 출처: 항상 네이버(2026-11-28 사용자 결정). 네이버가 실패할 때만 한투 → 공공데이터로 예비
+async function krSource() { return 'naver'; }
 // 일봉 → 주봉(월요일 시작 주로 묶기)
 function toWeekly(cs) {
   const out = [];
@@ -201,19 +201,29 @@ async function fetchCandles0(a, tf) {
     // 알파밴티지 한도·오류 → 같은 종목 무기한 선물 봉으로 대신(OKX → 바이비트)
     try { const cs = await perpCandles(a.sym, 'day'); const out = tf === 'week' ? toWeekly(cs) : cs; out.src = cs.src + '(Alpha Vantage 대신)'; return out; } catch { throw avErr; }
   }
-  if (a.cat === 'kr' && (await krSource()) === 'naver') {
-    const d = await relay('naver', { kind: 'candles', code: a.sym, days: 900 });
-    const cs = d.candles || []; if (!cs.length) throw new Error('네이버에서 봉을 받지 못했습니다');
-    const out = tf === 'week' ? toWeekly(cs) : cs; out.src = '네이버(비공식)'; return out;
+  if (a.cat === 'kr') {
+    let err;
+    try {
+      const d = await relay('naver', { kind: 'candles', code: a.sym, days: 900 });
+      const cs = d.candles || []; if (!cs.length) throw new Error('네이버에서 봉을 받지 못했습니다');
+      const out = tf === 'week' ? toWeekly(cs) : cs; out.src = '네이버(비공식)'; return out;
+    } catch (e) { err = e; }
+    // 네이버가 안 될 때만 예비: 한투 키 → 공공데이터
+    const st = await KV.get('relayStatus', {});
+    if (st.kis) { try { const d = await relay('kis', { kind: 'krCandles', code: a.sym, period: tf === 'week' ? 'W' : 'D' }); if ((d.candles || []).length) { d.candles.src = '한국투자증권(네이버 대신)'; return d.candles; } } catch { /* 공공데이터로 */ } }
+    if (st.krx) { try { const d = await relay('krx', { kind: 'candles', code: a.sym }); const cs = d.candles || []; if (cs.length) { const out = tf === 'week' ? toWeekly(cs) : cs; out.src = '공공데이터(네이버 대신)'; return out; } } catch { /* 처음 오류로 */ } }
+    throw err;
   }
-  if (a.cat === 'kr' && (await krSource()) === 'krx') {
-    const d = await relay('krx', { kind: 'candles', code: a.sym });
-    const cs = d.candles || [];
-    return tf === 'week' ? toWeekly(cs) : cs;
-  }
-  if (a.cat === 'kr' || a.cat === 'ffut') {
-    const d = await relay('kis', a.cat === 'kr' ? { kind: 'krCandles', code: a.sym, period: tf === 'week' ? 'W' : 'D' } : { kind: 'ffCandles', code: a.sym, exch: a.ex || '' });
-    return d.candles || [];
+  if (a.cat === 'ffut') {
+    const f = FF.front(a.sym), r = FF.info(a.sym);
+    if (!r) throw new Error(a.sym + ': 아는 해외선물 기호가 아닙니다(관심 종목에서 빼고 다시 추가해 주세요)');
+    // 한투 키가 있고 일봉이면 CME 실제 월물, 아니면 OKX 같은 기초자산 무기한
+    if ((await KV.get('relayStatus', {})).kis && tf === 'day') {
+      try { const d = await relay('kis', { kind: 'ffCandles', code: f.main.code, exch: r.ex }); if ((d.candles || []).length >= 30) { d.candles.src = '한국투자증권 ' + f.main.code; return d.candles; } } catch { /* OKX로 */ }
+    }
+    const cs = await perpCandles(r.okx, tf);
+    cs.src = 'OKX ' + r.okx + ' 무기한' + (r.etf ? '(ETF — 가격 수준이 선물과 다름)' : '') + ' · ' + f.main.code + ' 대신(한투 키 전까지)';
+    return cs;
   }
   throw new Error('알 수 없는 카테고리');
 }
@@ -261,11 +271,17 @@ async function searchAssets(cat, q) {
     if (!m.length && d.data && (d.data.Note || d.data.Information)) throw new Error(d.data.Note || d.data.Information);
     return m.slice(0, 15).map((x) => ({ sym: x['1. symbol'], name: x['2. name'], sub: `${x['1. symbol']} · ${x['4. region']} · ${x['8. currency']}` }));
   }
+  if (cat === 'ffut') {
+    const Q = q.trim().toUpperCase(), al = { 나스닥: 'NQ', 에스앤피: 'ES', 'S&P': 'ES', 러셀: 'RTY', 니케이: 'NKD', 원유: 'CL', 유가: 'CL', 브렌트: 'BZ', 가스: 'NG', 금: 'GC', 골드: 'GC', 은: 'SI', 구리: 'HG', 백금: 'PL', 팔라듐: 'PA', 국채: 'ZN' };
+    const hit = Object.keys(al).filter((k) => q && (k.includes(q.trim()) || q.includes(k))).map((k) => al[k]);
+    return FF.list().filter((x) => !Q || x.sym.startsWith(FF.root(Q)) || x.name.includes(q.trim()) || hit.includes(x.sym))
+      .map((x) => { const f = FF.front(x.sym); return { sym: x.sym, ex: x.r.ex, name: x.r.name, sub: `지금 ${f.main.code} · ${x.r.ex} · OKX ${x.r.okx}로 대신${x.r.etf ? '(ETF)' : ''}` }; });
+  }
   if (cat === 'kr') {
     if (!q) return [];
     const local = KR_POP.filter(([c, n]) => c.includes(q) || n.toUpperCase().includes(q.toUpperCase())).map(([c, n]) => ({ sym: c, name: n, sub: c }));
     let r = [];
-    try { r = (await relay((await KV.get('relayStatus', {})).naver ? 'naver' : 'krx', { kind: 'search', q })).items || []; } catch (e) { if (!local.length && !/^\d{6}$/.test(q)) throw e; }
+    try { r = (await relay('naver', { kind: 'search', q })).items || []; } catch (e) { if (!local.length && !/^\d{6}$/.test(q)) throw e; }
     const seen = new Set(r.map((x) => x.sym)), out = r.concat(local.filter((x) => !seen.has(x.sym)));
     if (/^\d{6}$/.test(q) && !out.some((x) => x.sym === q)) out.unshift({ sym: q, name: (KR_POP.find(([c]) => c === q) || [0, q])[1], sub: q + ' · 코드로 바로 추가' });
     return out.slice(0, 20);
@@ -277,7 +293,7 @@ async function searchAssets(cat, q) {
 async function quotes(list) {
   const out = {};
   const coins = [...new Set(list.filter((a) => a.cat === 'coin').map((a) => a.sym))];
-  const futs = list.filter((a) => a.cat === 'cfut'), uss = list.filter((a) => a.cat === 'us');
+  const futs = list.filter((a) => a.cat === 'cfut'), uss = list.filter((a) => a.cat === 'us'), ffs = list.filter((a) => a.cat === 'ffut' && FF.info(a.sym));
   const put = (t) => { out['coin:' + t.market] = { price: t.trade_price, chg: t.signed_change_rate * 100, vol: Number(t.acc_trade_price_24h) }; };
   // 업비트에 있는 코인은 업비트, 없는 코인(빗썸만)·업비트 실패는 빗썸 — 업비트는 모르는 종목이 하나라도 섞이면 전체를 거절함
   const coinQ = async () => {
@@ -288,6 +304,12 @@ async function quotes(list) {
     if (rest.length) { try { (await bithumb('/ticker?markets=' + rest.join(','))).forEach(put); } catch { /* 없음 */ } }
   };
   // 해외주식 현재가: OKX 무기한 선물(24시간 거래) 한 번에, 없으면 바이비트
+  // 해외선물 현재가: OKX 같은 기초자산 무기한(한투 키 전까지)
+  const ffQ = async () => {
+    if (!ffs.length) return;
+    const m = {}; (await okxGet('/market/tickers?instType=SWAP')).forEach((t) => { m[t.instId] = t; });
+    for (const a of ffs) { const t = m[FF.okxId(a.sym)]; if (t && +t.last) out['ffut:' + a.sym] = { price: +t.last, chg: +t.open24h ? (+t.last / +t.open24h - 1) * 100 : 0 }; }
+  };
   const usQ = async () => {
     if (!uss.length) return;
     try { const m = {}; (await okxGet('/market/tickers?instType=SWAP')).forEach((t) => { m[t.instId] = t; }); for (const a of uss) { const t = m[a.sym + '-USDT-SWAP']; if (t && +t.last) out['us:' + a.sym] = { price: +t.last, chg: +t.open24h ? (+t.last / +t.open24h - 1) * 100 : 0, src: 'OKX 선물' }; } } catch { /* 바이비트로 */ }
@@ -296,6 +318,7 @@ async function quotes(list) {
   await Promise.all([
     coinQ().catch(() => {}),
     usQ().catch(() => {}),
+    ffQ().catch(() => {}),
     ...futs.map((a) => binance('/ticker/24hr?symbol=' + encodeURIComponent(a.sym)).then((t) => { out['cfut:' + a.sym] = { price: +t.lastPrice, chg: +t.priceChangePercent, vol: +t.quoteVolume }; })
       .catch(() => bybitGet('/v5/market/tickers?category=linear&symbol=' + encodeURIComponent(a.sym)).then((r) => { const t = r.list && r.list[0]; if (t) out['cfut:' + a.sym] = { price: +t.lastPrice, chg: +t.price24hPcnt * 100, vol: +t.turnover24h }; }))
       .catch(() => {})),

@@ -4,7 +4,7 @@ const dir = new URL('.', import.meta.url);
 const gsPath = new URL('Code.gs', dir);
 let gs = fs.readFileSync(gsPath, 'utf8');
 // scan.js·levels.js는 선물 스캐너 앱(nasdaq-futures) 것을 씀: ETF 목록이 더 많고 강한 신호 계산(levels.js)과 rsiSeries가 있음
-const FROM = { 'zones.js': '../zones.js', 'nq.js': '../nq.js', 'scan.js': '../../nasdaq-futures/scan.js', 'levels.js': '../../nasdaq-futures/levels.js' };
+const FROM = { 'zones.js': '../zones.js', 'nq.js': '../nq.js', 'scan.js': '../../nasdaq-futures/scan.js', 'levels.js': '../../nasdaq-futures/levels.js', 'ffut.js': '../ffut.js' };
 for (const name of Object.keys(FROM)) {
   const src = fs.readFileSync(new URL(FROM[name], dir), 'utf8').trim();
   const A = '/* ==== ' + name + ' 시작', B = '/* ==== ' + name + ' 끝 ==== */';
@@ -13,4 +13,4 @@ for (const name of Object.keys(FROM)) {
   gs = gs.slice(0, gs.indexOf('\n', a) + 1) + src + '\n' + gs.slice(b);
 }
 fs.writeFileSync(gsPath, gs);
-console.log('zones.js·nq.js·scan.js·levels.js → Code.gs 복사 완료');
+console.log('zones.js·nq.js·scan.js·levels.js·ffut.js → Code.gs 복사 완료');
