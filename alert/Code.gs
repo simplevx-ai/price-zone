@@ -26,7 +26,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 15;
+const VERSION = 16;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -224,7 +224,8 @@ function naverRelay_(d) {
     if (d.kind === 'search') {
       const q = String(d.q || '').slice(0, 30); if (!q) return { ok: true, items: [] };
       const j = naverJson_('https://ac.stock.naver.com/ac?q=' + encodeURIComponent(q) + '&target=stock');
-      return { ok: true, items: (j.items || []).filter((x) => x.nationCode === 'KOR' && /^[0-9A-Z]{6}$/.test(x.code)).slice(0, 15).map((x) => ({ sym: x.code, name: x.name, sub: x.code + ' · ' + (x.typeName || '') })) };
+      const nation = d.nation === 'USA' ? 'USA' : 'KOR'; // v16: 미국 주식도(한글 이름·티커)
+      return { ok: true, items: (j.items || []).filter((x) => x.nationCode === nation && (nation === 'USA' ? /^[A-Z][A-Z0-9.-]{0,9}$/.test(x.code) : /^[0-9A-Z]{6}$/.test(x.code))).slice(0, 15).map((x) => ({ sym: x.code, name: x.name, sub: x.code + ' · ' + (x.typeName || '') })) };
     }
     if (d.kind === 'info') { // 종목 정보 + 수급(최근 5일) + 지금가
       if (!/^[0-9A-Z]{6}$/.test(code)) return { ok: false, error: '종목코드 모양이 아닙니다' };

@@ -141,9 +141,10 @@ function ruleCard(R, cat) {
 }
 
 // Claude 앱·ChatGPT에 붙여 넣을 분석 요청문(데이터 포함)
-function rulePrompt(w, cs, R) {
+function rulePrompt(w, cs, R, rowsN) {
+  const RN = rowsN || 20;
   const cat = w.cat, n = cs.length, d = (t) => aiDate(t, cat), I = AIInd.all(cs), f = (x) => (x == null || !Number.isFinite(x) ? '없음' : fmtP(x, cat));
-  const rows = cs.slice(-20).map((k, j) => { const i = n - 20 + j; return `| ${d(k.t)} | ${f(k.o)} | ${f(k.h)} | ${f(k.l)} | ${f(k.c)} | ${Math.round(k.v).toLocaleString('en-US')} | ${r2(I.rsi[i], 1)} | ${r2(I.macdh[i], 3)} |`; });
+  const rows = cs.slice(-RN).map((k, j) => { const i = n - RN + j; return `| ${d(k.t)} | ${f(k.o)} | ${f(k.h)} | ${f(k.l)} | ${f(k.c)} | ${Math.round(k.v).toLocaleString('en-US')} | ${r2(I.rsi[i], 1)} | ${r2(I.macdh[i], 3)} |`; });
   const ch = (k) => (n > k ? (((cs[n - 1].c - cs[n - 1 - k].c) / cs[n - 1 - k].c) * 100).toFixed(2) + '%' : '없음');
   const zones = R.zones && R.zones.length ? R.zones.map((z, i) => `- 구간 ${i + 1}: ${f(z.low)} ~ ${f(z.high)} (근거 ${z.kinds}가지, 점수 ${z.score}, 신뢰도 ${z.grade}): ${[...new Set(z.items.map((x) => x.label))].join(', ')} / ${ZoneMath.reactText(z.react)}`).join('\n') : '- 현재가 아래에 근거 2가지 이상 겹친 구간 없음';
   const rule = R.error ? R.error : R.analysts.map((a) => `- ${a.name} ${a.s > 0 ? '+' : ''}${a.s}: ${a.why.join(' / ')}`).join('\n') + `\n- 합계 ${R.total} → 규칙 등급 ${R.rating}`;
@@ -168,11 +169,11 @@ function rulePrompt(w, cs, R) {
 RSI(14) ${r2(I.rsi[n - 1], 1)} · MACD ${r2(I.macd[n - 1], 3)} / 시그널 ${r2(I.macds[n - 1], 3)} / 히스토그램 ${r2(I.macdh[n - 1], 3)}
 볼린저 상단 ${f(I.boll_ub[n - 1])} · 중간 ${f(I.boll[n - 1])} · 하단 ${f(I.boll_lb[n - 1])} · ATR(14) ${f(I.atr[n - 1])}
 </시세>
-<최근 20일>
+<최근 ${RN}일>
 | 날짜 | 시가 | 고가 | 저가 | 종가 | 거래량 | RSI | MACD 히스토그램 |
 |---|---|---|---|---|---|---|---|
 ${rows.join('\n')}
-</최근 20일>
+</최근 ${RN}일>
 <검토 구간(현재가 아래 지지 후보, 앱 계산)>
 ${zones}
 </검토 구간>
@@ -193,9 +194,17 @@ async function renderFreeAi(host, w) {
   host.innerHTML = `<div class="card"><h2>📐 규칙 분석 <span class="muted">(키 없이 바로 · 무료)</span></h2>
       <div class="muted" style="font-size:13px">분석가 8명(추세·모멘텀·거래량·구간·위험·상위 봉·변동성 국면·저항과 손익비)이 정해진 규칙으로 점수를 매겨 5단계 등급을 냅니다. AI가 아닌 계산이라 같은 데이터면 같은 결과입니다.</div>
       <div id="ruleOut" style="margin-top:8px"><div class="muted">일봉 받는 중…</div></div></div>
+    <div class="card" style="border:2px solid #D97757"><h2>🟠 내 Claude로 바로 분석 <span class="muted">(구독 Pro·Max로 · API 키 필요 없음)</span></h2>
+      <div style="font-size:14px">버튼을 누르면 이 종목의 시세·지표·검토 구간·규칙 분석을 담은 요청문이 <b>Claude 새 대화에 채워진 채로</b> 열립니다. 보내기만 누르면 전문가 팀식 분석이 나옵니다.</div>
+      <button class="btn primary block" id="openClaude" type="button" disabled style="margin-top:8px;background:#D97757;border-color:#D97757">🟠 Claude에서 이 종목 분석하기</button>
+      <div id="ocMsg" class="muted" style="font-size:12px;margin-top:4px">요청문 만드는 중…</div>
+      <details style="margin-top:6px"><summary class="muted" style="font-size:13px">왜 앱 안에서 자동으로 안 되나요?</summary><ul class="steps" style="font-size:13px;margin-top:6px">
+        <li><b>Claude 구독(Pro·Max)</b>은 claude.ai·Claude 앱에서 쓰는 요금제라, 다른 앱이 대신 불러 쓰는 통로(API)가 없습니다. 그래서 앱은 요청문을 <b>채워서 열어 주는</b> 데까지 합니다(보내기는 직접).</li>
+        <li><b>앱 안 완전 자동</b>은 아래 '🤖 Claude 전문가 팀 자동 분석'처럼 <b>Anthropic API 키</b>(구독과 별도, 쓴 만큼 결제 — 종목 1개 약 1달러 안팎)가 있어야 합니다.</li>
+        <li><b>또 다른 방법</b>: 이 PC의 Claude Code가 정해진 시간에 관심 종목을 분석해 디스코드로 보내기(구독 사용량 안에서, PC가 켜져 있어야 함).</li></ul></details></div>
     <div class="card"><h2>📋 AI에 붙여 넣을 분석 요청문</h2>
       <div class="muted" style="font-size:13px">시세·지표·검토 구간·규칙 분석을 담은 요청문을 복사합니다. <b>Claude 앱이나 ChatGPT에 붙여 넣으면</b> 지금 쓰는 구독으로 전문가 팀식 분석(분석가 → 강세·약세 토론 → 위험 관리 → 5단계 등급 → 공부 정리)을 받을 수 있습니다. API 키가 필요 없습니다.</div>
-      <div class="row wrap" style="gap:6px;margin-top:8px"><button class="btn primary" id="cpPrompt" type="button" disabled>📋 요청문 복사</button><a class="btn" href="https://claude.ai/new" target="_blank" rel="noopener">Claude 열기 ↗</a><a class="btn" href="https://chatgpt.com/" target="_blank" rel="noopener">ChatGPT 열기 ↗</a></div>
+      <div class="row wrap" style="gap:6px;margin-top:8px"><button class="btn primary" id="cpPrompt" type="button" disabled>📋 요청문 복사</button><a class="btn" href="https://claude.ai/new" target="_blank" rel="noopener">빈 Claude 열기 ↗</a><a class="btn" href="https://chatgpt.com/" target="_blank" rel="noopener">ChatGPT 열기 ↗</a></div>
       <details style="margin-top:8px"><summary class="muted" style="font-size:13px">요청문 미리 보기</summary><textarea id="pv" readonly style="width:100%;min-height:180px;font-size:12px;margin-top:6px"></textarea></details>
       <div id="cpMsg" class="muted" style="font-size:12px;margin-top:4px"></div></div>`;
   let cs;
@@ -205,5 +214,12 @@ async function renderFreeAi(host, w) {
   $('#ruleOut').innerHTML = ruleCard(R, w.cat) + `<div class="muted" style="font-size:12px;margin-top:6px">기준 ${aiDate(cs[cs.length - 1].t, w.cat)} 일봉 ${cs.length}개${cs.src ? ' · 출처 ' + esc(cs.src) : ''}</div>`;
   const text = rulePrompt(w, cs, R);
   $('#pv').value = text; $('#cpPrompt').disabled = false;
+  // Claude에서 열기: 주소에 요청문을 담음(주소가 너무 길면 줄인 요청문, 그래도 길면 복사 후 붙여 넣기 안내)
+  const short = rulePrompt(w, cs, R, 8), enc = (t) => 'https://claude.ai/new?q=' + encodeURIComponent(t);
+  const url = enc(text).length <= 12000 ? enc(text) : enc(short).length <= 12000 ? enc(short) : enc('방금 복사한 분석 요청문을 붙여 넣을게요. 그 데이터만 근거로 분석해 주세요.');
+  const full = url === enc(text), cut = url === enc(short);
+  $('#ocMsg').textContent = full ? '요청문 전체가 채워져 열립니다(전체 요청문은 복사도 해 둡니다).' : cut ? '주소 길이 때문에 최근 8일 표로 줄인 요청문이 채워집니다(전체는 복사해 둡니다).' : '요청문이 길어 복사해 둡니다 — Claude가 열리면 붙여 넣기 하세요.';
+  $('#openClaude').disabled = false;
+  $('#openClaude').onclick = () => { copyText(text); window.open(url, '_blank', 'noopener'); }; // 복사는 누르는 순간 시작(창이 바뀌기 전), 열기는 바로(팝업 차단 방지)
   $('#cpPrompt').onclick = async () => { const ok = await copyText(text); $('#cpMsg').textContent = ok ? `✅ 복사했습니다(${text.length.toLocaleString('ko-KR')}자). Claude 앱이나 ChatGPT 대화창에 붙여 넣으세요.` : '복사가 안 됐습니다. 위 미리 보기를 길게 눌러 전체 선택 후 복사하세요.'; };
 }

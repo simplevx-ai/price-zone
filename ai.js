@@ -382,7 +382,7 @@ async function viewAiAsset(cat, sym) {
   if (!live()) return;
   view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">${AI_DISC}</div>
     <div id="freeAi"></div>
-    ${claudeOk ? `<div class="card"><h2>🤖 Claude 전문가 팀 자동 분석 <span class="muted">(Claude API 키가 있을 때)</span></h2>
+    ${claudeOk ? `<div class="card"><h2>🤖 Claude 전문가 팀 자동 분석 <span class="muted">(Anthropic API 키 — Claude 구독과 별도 결제)</span></h2>
       <ul class="steps" style="font-size:13px"><li>데이터: 일봉·지표(앱이 계산), 회사 개요·재무, 최근 뉴스 40건과 감성 점수 (Alpha Vantage 2번 사용)</li>
       <li>Claude(claude-opus-5-5)를 13번 부릅니다. 3~6분 걸리고 <b>약 1달러 안팎</b>(추정)이 듭니다.</li>
       <li>도는 동안 화면을 켜 두세요. 중간에 멈추면 '이어서 하기'로 남은 단계만 다시 합니다.</li></ul>

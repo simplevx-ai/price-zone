@@ -12,7 +12,7 @@
 
 const CATS = {
   kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'krx|kis|naver', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
-  us: { label: '해외주식', icon: '🇺🇸', tfs: ['day', 'week'], unit: '$', needs: 'av', hint: '티커(예: AAPL, NVDA)' },
+  us: { label: '해외주식', icon: '🇺🇸', tfs: ['day', 'week'], unit: '$', needs: 'av', hint: '티커나 한글 이름(예: NVDA, 엔비디아)' },
   // 봉 순서는 앱 전체에서 짧은 것부터: 15분 · 30분 · 1시간 · 4시간 · 일봉 (· 주봉)
   coin: { label: '코인', icon: '🪙', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: '원' },
   cfut: { label: '코인선물', icon: '⚡', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: 'USDT' },
@@ -219,6 +219,11 @@ async function fetchCandles0(a, tf) {
 }
 
 /* ───────── 종목 찾기 ───────── */
+// 자주 찾는 국내 종목(네이버 자동완성이 단어 중간 일부로는 못 찾을 때 — 예: '하이닉')
+const KR_POP = [['005930', '삼성전자'], ['000660', 'SK하이닉스'], ['373220', 'LG에너지솔루션'], ['207940', '삼성바이오로직스'], ['005380', '현대차'], ['000270', '기아'], ['068270', '셀트리온'], ['035420', 'NAVER'], ['035720', '카카오'], ['005490', 'POSCO홀딩스'], ['051910', 'LG화학'], ['006400', '삼성SDI'], ['105560', 'KB금융'], ['055550', '신한지주'], ['012330', '현대모비스'], ['028260', '삼성물산'], ['066570', 'LG전자'], ['003550', 'LG'], ['034020', '두산에너빌리티'], ['012450', '한화에어로스페이스'], ['329180', 'HD현대중공업'], ['042660', '한화오션'], ['009540', 'HD한국조선해양'], ['011200', 'HMM'], ['259960', '크래프톤'], ['247540', '에코프로비엠'], ['086520', '에코프로'], ['196170', '알테오젠'], ['028300', 'HLB'], ['058470', '리노공업'], ['042700', '한미반도체'], ['000810', '삼성화재'], ['032830', '삼성생명'], ['015760', '한국전력'], ['017670', 'SK텔레콤'], ['030200', 'KT'], ['096770', 'SK이노베이션'], ['034730', 'SK'], ['018260', '삼성에스디에스'], ['010130', '고려아연'], ['009150', '삼성전기'], ['267260', 'HD현대일렉트릭'], ['064350', '현대로템'], ['079550', 'LIG넥스원'], ['352820', '하이브'], ['041510', '에스엠'], ['035900', 'JYP Ent.'], ['293490', '카카오게임즈'], ['323410', '카카오뱅크'], ['377300', '카카오페이']];
+// 자주 찾는 해외 종목 한글 이름(스크립트가 없거나 옛 버전일 때)
+const US_KO = { NVDA: '엔비디아', AAPL: '애플', MSFT: '마이크로소프트', GOOGL: '구글 알파벳', AMZN: '아마존', META: '메타', TSLA: '테슬라', AVGO: '브로드컴', AMD: 'AMD', INTC: '인텔', MU: '마이크론', SNDK: '샌디스크', TSM: 'TSMC', PLTR: '팔란티어', NFLX: '넷플릭스', COIN: '코인베이스', MSTR: '스트래티지', QQQ: '나스닥100 ETF', SPY: 'S&P500 ETF', TQQQ: '나스닥 3배', SOXL: '반도체 3배', ANT: '앤트로픽', ORCL: '오라클', CRM: '세일즈포스', ADBE: '어도비', QCOM: '퀄컴', ARM: 'ARM', SMCI: '슈퍼마이크로', DELL: '델', IONQ: '아이온큐' };
+const hasKo = (s) => /[가-힣]/.test(s);
 async function searchAssets(cat, q) {
   q = q.trim();
   if (cat === 'coin') {
@@ -227,7 +232,9 @@ async function searchAssets(cat, q) {
     const all = u.map((m) => ({ ...m, ex: '' })).concat(b.filter((m) => !inU.has(m.market)).map((m) => ({ ...m, ex: '빗썸' }))); // 같은 종목은 업비트 하나만(중복 없음)
     if (!all.length) throw new Error('업비트·빗썸 종목 목록을 받지 못했습니다');
     const Q = q.toUpperCase();
-    return all.filter((m) => !Q || m.korean_name.toUpperCase().includes(Q) || m.market.slice(4).includes(Q) || String(m.english_name || '').toUpperCase().includes(Q)).slice(0, 60).map((m) => ({ sym: m.market, name: m.korean_name, sub: m.market.slice(4) + (m.ex ? ' · ' + m.ex + '만' : '') }));
+    // 정확히 같은 것 → 앞부분이 같은 것 → 나머지 순서(예: '비트' → 비트코인 먼저)
+    const rk = (m) => (m.market.slice(4) === Q || m.korean_name === q ? 0 : m.korean_name.startsWith(q) || m.market.slice(4).startsWith(Q) ? 1 : 2) * 1e6 - (m.korean_name === '비트코인' ? 1 : 0);
+    return all.filter((m) => !Q || m.korean_name.toUpperCase().includes(Q) || m.market.slice(4).includes(Q) || String(m.english_name || '').toUpperCase().includes(Q)).sort((a, b) => rk(a) - rk(b)).slice(0, 60).map((m) => ({ sym: m.market, name: m.korean_name, sub: m.market.slice(4) + (m.ex ? ' · ' + m.ex + '만' : '') }));
   }
   if (cat === 'cfut') {
     let all = await KV.get('binanceSyms', null);
@@ -236,12 +243,19 @@ async function searchAssets(cat, q) {
       try { list = (await binance('/ticker/price')).map((x) => x.symbol); } catch { list = ((await bybitGet('/v5/market/instruments-info?category=linear&limit=1000')).list || []).filter((x) => x.status === 'Trading').map((x) => x.symbol); }
       all = { at: Date.now(), data: [...new Set(list.filter((s) => /USDT$/.test(s)))].sort() }; KV.set('binanceSyms', all).catch(() => {});
     }
-    const Q = q.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    let Q = q.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const ko = {}; if (hasKo(q) || q) { try { (await upbitMarkets()).forEach((m) => { ko[m.market.slice(4)] = m.korean_name; }); } catch { /* 한글 이름 없이 */ } }
+    const koHit = hasKo(q) ? new Set(Object.keys(ko).filter((b) => ko[b].includes(q))) : null; if (koHit) Q = '';
     const rank = (s) => (s === Q + 'USDT' ? 0 : s.startsWith(Q) ? 1 : 2);
-    return all.data.filter((s) => !Q || s.includes(Q)).sort((x, y) => rank(x) - rank(y) || x.localeCompare(y)).slice(0, 60).map((s) => ({ sym: s, name: s.replace(/USDT$/, '') + ' 무기한', sub: s }));
+    return all.data.filter((s) => (koHit ? koHit.has(s.replace(/USDT$/, '')) : !Q || s.includes(Q))).sort((x, y) => rank(x) - rank(y) || x.localeCompare(y)).slice(0, 60).map((s) => { const b = s.replace(/USDT$/, ''); return { sym: s, name: (ko[b] ? ko[b] + ' ' : '') + b + ' 무기한', sub: s }; });
   }
   if (cat === 'us') {
     if (!q) return [];
+    const local = Object.entries(US_KO).filter(([t, n]) => t.includes(q.toUpperCase()) || n.includes(q)).map(([t, n]) => ({ sym: t, name: n, sub: t }));
+    const st = await KV.get('relayStatus', {});
+    if (st.naver && (st.version || 0) >= 16) { try { const r = (await relay('naver', { kind: 'search', q, nation: 'USA' })).items || []; const seen = new Set(r.map((x) => x.sym)); const out = r.concat(local.filter((x) => !seen.has(x.sym))); if (out.length) return out; } catch { /* Alpha Vantage로 */ } }
+    if (hasKo(q)) return local;
+    if (local.length && !st.av) return local;
     const d = await relay('av', { fn: 'SYMBOL_SEARCH', keywords: q });
     const m = (d.data && d.data.bestMatches) || [];
     if (!m.length && d.data && (d.data.Note || d.data.Information)) throw new Error(d.data.Note || d.data.Information);
@@ -249,7 +263,12 @@ async function searchAssets(cat, q) {
   }
   if (cat === 'kr') {
     if (!q) return [];
-    return (await relay((await krSource()) === 'naver' ? 'naver' : 'krx', { kind: 'search', q })).items || [];
+    const local = KR_POP.filter(([c, n]) => c.includes(q) || n.toUpperCase().includes(q.toUpperCase())).map(([c, n]) => ({ sym: c, name: n, sub: c }));
+    let r = [];
+    try { r = (await relay((await KV.get('relayStatus', {})).naver ? 'naver' : 'krx', { kind: 'search', q })).items || []; } catch (e) { if (!local.length && !/^\d{6}$/.test(q)) throw e; }
+    const seen = new Set(r.map((x) => x.sym)), out = r.concat(local.filter((x) => !seen.has(x.sym)));
+    if (/^\d{6}$/.test(q) && !out.some((x) => x.sym === q)) out.unshift({ sym: q, name: (KR_POP.find(([c]) => c === q) || [0, q])[1], sub: q + ' · 코드로 바로 추가' });
+    return out.slice(0, 20);
   }
   return [];
 }

@@ -15,9 +15,12 @@ const BT_TF = {
   '1H': { label: '1시간봉', ms: 3600e3, okx: '1H', bn: '1h', hi: '4H' }, '4H': { label: '4시간봉', ms: 4 * 3600e3, okx: '4H', bn: '4h', hi: '1D' },
   '1D': { label: '일봉', ms: 86400e3, okx: '1Dutc', bn: '1d', hi: null },
 };
-const BT_EX = { okx: 'OKX', bn: '바이낸스', by: '바이비트', gate: '게이트' };
+const BT_EX = { okx: 'OKX', bn: '바이낸스', by: '바이비트', gate: '게이트', krx: '🇰🇷 국내주식(네이버 일봉)' };
 // 거래소별 수수료(한쪽, %, 일반 등급 공개 요율 기준 — 등급·쿠폰에 따라 다름)
-const BT_FEES = { okx: { taker: 0.05, maker: 0.02 }, bn: { taker: 0.05, maker: 0.02 }, by: { taker: 0.055, maker: 0.02 }, gate: { taker: 0.05, maker: 0.02 } };
+// 국내주식: 수수료 0.015%(한쪽) + 매도 때 세금 0.20% → 한쪽 평균 0.115%로 계산(펀딩비 없음)
+const BT_FEES = { okx: { taker: 0.05, maker: 0.02 }, bn: { taker: 0.05, maker: 0.02 }, by: { taker: 0.055, maker: 0.02 }, gate: { taker: 0.05, maker: 0.02 }, krx: { taker: 0.115, maker: 0.115 } };
+// '다른 종목' 입력값 → 거래소 기호(국내는 6자리 코드)
+const btNorm = (ex, v) => { v = String(v || '').trim(); if (ex === 'krx') { const m = v.match(/\d{6}/); return m ? m[0] : ''; } return v.toUpperCase().split(/[\s·]/)[0].replace(/[-_]?USDT(-SWAP)?$/, '').replace(/^KRW-/, '').replace(/[^A-Z0-9]/g, ''); };
 const BT_BY_IV = { '15m': '15', '30m': '30', '1H': '60', '4H': '240', '1D': 'D' }, BT_GATE_IV = { '15m': '15m', '30m': '30m', '1H': '1h', '4H': '4h', '1D': '1d' };
 // '살펴볼 기간': 봉 개수를 날짜로 바꿔 보여 줌
 const btSpan = (n, tf) => { const d = (n * BT_TF[tf].ms) / 86400e3; return d >= 60 ? `약 ${(d / 30).toFixed(d >= 300 ? 0 : 1)}개월` : d >= 2 ? `약 ${Math.round(d)}일` : `약 ${Math.round(d * 24)}시간`; };
@@ -29,6 +32,11 @@ async function btMeta(ex, base) {
   const key = `btmeta:${ex}:${base}`, hit = await KV.get(key, null);
   if (hit && Date.now() - hit.at < 86400e3) return hit.data;
   let data = null;
+  if (ex === 'krx') { // 국내주식: 네이버(스크립트 v15 중계)로 이름·지금가 확인
+    if (!/^\d{6}$/.test(base)) return null;
+    try { const d = await relay('naver', { kind: 'info', code: base }); if (d.name) return { sym: `${base} ${d.name}`, kind: '국내주식 현물(네이버 일봉 — 공식 API 아님)', settle: 'KRW', tickSz: '호가 단위 가격대별' }; } catch { return null; }
+    return null;
+  }
   if (ex === 'okx') {
     const r = (await okxGet(`/public/instruments?instType=SWAP&instId=${encodeURIComponent(base)}-USDT-SWAP`))[0];
     if (r && r.state === 'live') data = { sym: r.instId, kind: r.instCategory === '3' ? '주식·ETF 무기한 선물(OKX 분류 3)' : '코인 무기한 선물', ctVal: r.ctVal + ' ' + r.ctValCcy, ctMult: r.ctMult, lotSz: r.lotSz, minSz: r.minSz, tickSz: r.tickSz, ctType: r.ctType, settle: r.settleCcy, listed: +r.listTime || null };
@@ -51,6 +59,11 @@ async function btMeta(ex, base) {
 // 봉 받기(끝난 봉만, 오래된 것부터)
 async function btCandles(ex, base, tf, want, onProg) {
   const f = BT_TF[tf];
+  if (ex === 'krx') {
+    if (tf !== '1D') throw new Error('국내주식은 일봉만 됩니다(봉을 일봉으로 바꾸세요)');
+    const d = await relay('naver', { kind: 'candles', code: base, days: Math.min(1500, Math.ceil(want * 1.5) + 30) });
+    return (d.candles || []).slice(-want);
+  }
   if (ex === 'by') { // 1000봉씩, 최신부터 거꾸로 이어 받기
     let out = [], end = '';
     while (out.length < want) {
@@ -93,6 +106,7 @@ const btT = (t) => new Date(t).toLocaleString('ko-KR', { year: '2-digit', month:
 
 async function viewBacktest() {
   setTitle('🧪 백테스트');
+  const watchOpts = (await getWatch()).map((w) => (w.cat === 'kr' ? { v: 'kr:' + w.sym, t: '🇰🇷 ' + w.name + ' ' + w.sym } : w.cat === 'cfut' ? { v: w.sym.replace(/USDT$/, ''), t: '⚡ ' + w.name } : w.cat === 'coin' ? { v: w.sym.replace(/^KRW-/, ''), t: '🪙 ' + w.name + ' (무기한 선물로)' } : w.cat === 'us' ? { v: w.sym, t: '🇺🇸 ' + w.name + ' (무기한 선물로)' } : null)).filter(Boolean).filter((w, i, a) => a.findIndex((x) => x.v === w.v) === i);
   const P = Object.assign({ ex: 'okx', base: 'QQQ', tf: '1H', bars: 1000, strat: 'B', capital: 1000, riskPct: 1, lev: 1, fee: 0.05, feeKind: 'taker', slip: 0.05, fund8h: 0.01, stopAtr: 2, rr: 2, trailAtr: 0, timeBars: 0, half: false }, await KV.get('btPrefs', {}));
   const runs = await KV.get('bt:runs', []);
   const opt = (v, t, cur) => `<option value="${v}"${String(v) === String(cur) ? ' selected' : ''}>${t}</option>`;
@@ -102,7 +116,8 @@ async function viewBacktest() {
     <div class="card"><h2>설정</h2>
       <div class="grid2">
         <div><label for="bx">거래소</label><select id="bx">${Object.entries(BT_EX).map(([k, v]) => opt(k, v, P.ex)).join('')}</select></div>
-        <div><label for="bb">상품(무기한 선물)</label><select id="bb">${BT_PRODUCTS.map((p) => opt(p.id, p.name, P.base)).join('')}${BT_PRODUCTS.some((p) => p.id === P.base) ? '' : opt(P.base, P.base, P.base)}</select></div>
+        <div><label for="bb">상품</label><select id="bb"><optgroup label="기본 상품(무기한 선물)">${BT_PRODUCTS.map((p) => opt(p.id, p.name, P.base)).join('')}</optgroup>${watchOpts.length ? `<optgroup label="⭐ 내 관심 종목">${watchOpts.map((w) => opt(w.v, w.t, P.ex === 'krx' ? 'kr:' + P.base : P.base)).join('')}</optgroup>` : ''}${BT_PRODUCTS.some((p) => p.id === P.base) || watchOpts.some((w) => w.v === P.base || w.v === 'kr:' + P.base) ? '' : opt(P.base, P.base + ' (직접 입력)', P.base)}</select></div>
+        <div style="grid-column:1/-1"><label for="bq">다른 종목 찾기 <span class="muted" style="font-size:11px">(코드나 이름 하나만 — 예: PLTR, 도지, 005930, 삼성전)</span></label><input id="bq" list="bql" autocomplete="off" placeholder="비워 두면 위 상품"><datalist id="bql"></datalist><div class="muted" id="bqm" style="font-size:11px"></div></div>
         <div><label for="btf">봉</label><select id="btf">${Object.entries(BT_TF).map(([k, v]) => opt(k, v.label, P.tf)).join('')}</select></div>
         <div><label for="bn">살펴볼 기간</label><select id="bn"></select><div class="muted" style="font-size:11px">고른 봉으로 거슬러 올라가는 기간(괄호는 봉 수)</div></div>
       </div>
@@ -139,9 +154,24 @@ async function viewBacktest() {
   fillBars(P.bars); $('#btf').addEventListener('change', () => fillBars());
   const fillFee = () => { const k = $('#bfk').value, f = BT_FEES[$('#bx').value]; if (k !== 'custom' && f) $('#bfee').value = f[k]; };
   $('#bfk').onchange = fillFee; $('#bx').addEventListener('change', fillFee);
+  const krMode = () => { if ($('#bx').value === 'krx') { $('#btf').value = '1D'; fillBars(); $('#bfund').value = 0; $('#blev').value = 1; } };
+  $('#bx').addEventListener('change', krMode);
+  $('#bb').addEventListener('change', () => { const v = $('#bb').value; if (v.startsWith('kr:')) { $('#bx').value = 'krx'; fillFee(); krMode(); } else if ($('#bx').value === 'krx') { $('#bx').value = 'okx'; fillFee(); } $('#bq').value = ''; });
+  let bqT;
+  $('#bq').addEventListener('input', () => { clearTimeout(bqT); const q = $('#bq').value.trim(); if (q.length < 1) { $('#bqm').textContent = ''; return; } bqT = setTimeout(async () => {
+    try {
+      const kr = $('#bx').value === 'krx' || /^\d{2,6}$/.test(q) || (/[가-힣]/.test(q) && !(await searchAssets('cfut', q).catch(() => [])).length);
+      const L = kr ? await searchAssets('kr', q) : await searchAssets('cfut', q);
+      if (kr && $('#bx').value !== 'krx') { $('#bx').value = 'krx'; fillFee(); krMode(); }
+      $('#bql').innerHTML = L.slice(0, 20).map((x) => `<option value="${esc(kr ? x.sym + ' ' + x.name : x.sym.replace(/USDT$/, ''))}">${esc(x.name)}</option>`).join('');
+      $('#bqm').textContent = L.length ? `${L.length}개 찾음 — 목록에서 고르거나 그대로 실행` : '찾은 종목이 없습니다(정확한 기호·코드를 넣어 보세요)';
+    } catch (e) { $('#bqm').textContent = e.message; }
+  }, 400); });
+  krMode();
   $('#bfee').addEventListener('input', () => { $('#bfk').value = 'custom'; });
   $('#bs').onchange = showDesc; showDesc();
-  const read = () => ({ ex: $('#bx').value, base: $('#bb').value, tf: $('#btf').value, bars: +$('#bn').value, strat: $('#bs').value, capital: +$('#bcap').value, riskPct: +$('#brisk').value, lev: +$('#blev').value, fee: +$('#bfee').value, feeKind: $('#bfk').value, slip: +$('#bslip').value, fund8h: +$('#bfund').value, stopAtr: +$('#bstop').value, rr: +$('#brr').value, trailAtr: +$('#btrail').value || 0, timeBars: Math.max(0, Math.round(+$('#btime').value || 0)), half: $('#bhalf').checked });
+  const pickBase = () => { const q = btNorm($('#bx').value, $('#bq').value); if (q) return q; const v = $('#bb').value; return v.startsWith('kr:') ? v.slice(3) : v; };
+  const read = () => ({ ex: $('#bx').value, base: pickBase(), tf: $('#btf').value, bars: +$('#bn').value, strat: $('#bs').value, capital: +$('#bcap').value, riskPct: +$('#brisk').value, lev: +$('#blev').value, fee: +$('#bfee').value, feeKind: $('#bfk').value, slip: +$('#bslip').value, fund8h: +$('#bfund').value, stopAtr: +$('#bstop').value, rr: +$('#brr').value, trailAtr: +$('#btrail').value || 0, timeBars: Math.max(0, Math.round(+$('#btime').value || 0)), half: $('#bhalf').checked });
   const go = async (all) => {
     const p = read(), msg = (t) => { $('#bmsg').innerHTML = t; };
     if (!(p.capital > 0 && p.riskPct > 0 && p.lev > 0 && p.stopAtr > 0 && p.rr > 0 && p.fee >= 0 && p.slip >= 0 && p.fund8h >= 0)) { msg('<span style="color:var(--red)">설정 값을 확인하세요(0보다 커야 하는 값이 있음)</span>'); return; }
@@ -150,7 +180,7 @@ async function viewBacktest() {
     try {
       msg('상품 정보 확인 중…');
       const meta = await btMeta(p.ex, p.base);
-      if (!meta) { msg(`<span style="color:var(--red)">${esc(BT_EX[p.ex])}에 ${esc(p.base)} USDT 무기한 선물이 없거나 거래 중이 아니라 실행하지 않습니다(상품 정보를 확인할 수 없는 상품은 제외).</span>`); return; }
+      if (!meta) { msg(`<span style="color:var(--red)">${p.ex === 'krx' ? `국내주식 ${esc(p.base)}을(를) 네이버에서 확인하지 못했습니다(6자리 코드인지, 설정에서 알림 스크립트 v15 이상이 연결됐는지 확인)` : `${esc(BT_EX[p.ex])}에 ${esc(p.base)} USDT 무기한 선물이 없거나 거래 중이 아니라 실행하지 않습니다 — 다른 거래소를 골라 보세요`}.</span>`); return; }
       msg(`${esc(BT_EX[p.ex])} ${esc(p.base)} ${BT_TF[p.tf].label} 최근 ${btSpan(p.bars, p.tf)} 받는 중…`);
       const fetched = new Date();
       const cs = await btCandles(p.ex, p.base, p.tf, p.bars, (k) => msg(`봉 받는 중… ${k}개`));
@@ -178,7 +208,7 @@ async function viewBacktest() {
     finally { $('#brun').disabled = $('#ball').disabled = false; }
   };
   $('#brun').onclick = () => go(false);
-  view().querySelectorAll('[data-rerun]').forEach((b) => { b.onclick = () => { const o = runs[+b.dataset.rerun].opt; const set = (id, v) => { const el = $('#' + id); if (el && v != null) { if (el.tagName === 'SELECT' && ![...el.options].some((x) => x.value === String(v))) el.add(new Option(String(v), String(v))); el.value = String(v); } }; set('bx', o.ex); set('bb', o.base); set('btf', o.tf); set('bn', o.bars); set('bs', o.strat); set('bcap', o.capital); set('brisk', o.riskPct); set('blev', o.lev); set('bfee', o.fee); set('bslip', o.slip); set('bfund', o.fund8h); set('bstop', o.stopAtr); set('brr', o.rr); set('btrail', o.trailAtr || 0); set('btime', o.timeBars || 0); if ($('#bhalf')) $('#bhalf').checked = !!o.half; fillBars(o.bars); showDesc(); window.scrollTo(0, 0); go(false); }; });
+  view().querySelectorAll('[data-rerun]').forEach((b) => { b.onclick = () => { const o = runs[+b.dataset.rerun].opt; const set = (id, v) => { const el = $('#' + id); if (el && v != null) { if (el.tagName === 'SELECT' && ![...el.options].some((x) => x.value === String(v))) el.add(new Option(String(v), String(v))); el.value = String(v); } }; set('bx', o.ex); set('bb', o.ex === 'krx' ? 'kr:' + o.base : o.base); if (![...$('#bb').options].some((x) => x.value === $('#bb').value)) $('#bq').value = o.base; set('btf', o.tf); set('bn', o.bars); set('bs', o.strat); set('bcap', o.capital); set('brisk', o.riskPct); set('blev', o.lev); set('bfee', o.fee); set('bslip', o.slip); set('bfund', o.fund8h); set('bstop', o.stopAtr); set('brr', o.rr); set('btrail', o.trailAtr || 0); set('btime', o.timeBars || 0); if ($('#bhalf')) $('#bhalf').checked = !!o.half; fillBars(o.bars); showDesc(); window.scrollTo(0, 0); go(false); }; });
   $('#ball').onclick = () => go(true);
 }
 
@@ -188,8 +218,8 @@ function btAssume(r, ctx, p) {
     <li>데이터: ${esc(ctx.src)} · 최근 ${btSpan(r.bars, p.tf)}(봉 ${r.bars}개, 앞 ${STRATS.warmup}봉은 지표 준비) · ${btT(r.from)} ~ ${btT(r.to)} · 받은 시각 ${btT(ctx.fetched)}</li>
     <li>데이터 검사: 중복 ${iss.dup} · 비정상 봉 ${iss.bad} · 빈 구간 ${iss.gaps}곳(${iss.gapBars}봉)${iss.dup || iss.bad ? ' — 문제 봉은 빼고 계산' : ''}${iss.gaps ? ' — 빈 구간은 채우지 않음(거래 중단·점검 시간일 수 있음)' : ''}</li>
     <li>상품: ${esc(m.sym)} · ${esc(m.kind)}${m.ctVal ? ' · 1계약 = ' + esc(m.ctVal) : ''}${m.lotSz ? ' · 수량 단위 ' + esc(m.lotSz) : ''}${m.minSz ? ' · 최소 ' + esc(m.minSz) : ''}${m.tickSz ? ' · 호가 단위 ' + esc(m.tickSz) : ''}${m.minNotional ? ' · 최소 명목가 ' + esc(m.minNotional) : ''}${m.listed ? ' · 상장 ' + btT(m.listed) : ''}</li>
-    <li>거래소 무기한 선물 가격입니다. 미국 상장 ETF·주식의 실제 가격이 아니며(24시간 거래·펀딩비), ETF 자체의 일일 레버리지·복리 효과와 거래소 레버리지는 다릅니다.</li>
-    <li>비용 가정: 수수료 한쪽 ${p.fee}% · 슬리피지 한쪽 ${p.slip}% · 펀딩비 8시간마다 ${p.fund8h}%(가정, 롱이 냄) · 계약 단위 반올림 안 함 · 롱만</li>
+    <li>${p.ex === 'krx' ? '한국거래소 실제 일봉(네이버 공개 주소)입니다. 장 시간(9:00~15:30)만 거래되고 밤사이 갭이 생길 수 있습니다.' : '거래소 무기한 선물 가격입니다. 미국 상장 ETF·주식의 실제 가격이 아니며(24시간 거래·펀딩비), ETF 자체의 일일 레버리지·복리 효과와 거래소 레버리지는 다릅니다.'}</li>
+    <li>비용 가정: ${p.ex === 'krx' ? `수수료 0.015% + 매도 세금 0.20%를 한쪽 평균 ${p.fee}%로 · 슬리피지 한쪽 ${p.slip}% · 펀딩비 없음(현물) · 주 단위 반올림 안 함 · 롱만` : `수수료 한쪽 ${p.fee}% · 슬리피지 한쪽 ${p.slip}% · 펀딩비 8시간마다 ${p.fund8h}%(가정, 롱이 냄) · 계약 단위 반올림 안 함 · 롱만`}</li>
     <li>위험 가정: 초기 ${p.capital} USDT · 거래당 위험 ${p.riskPct}% · 최대 배율 ${p.lev}배 · 손절 ATR×${p.stopAtr} · 목표 ${p.rr}R${p.trailAtr ? ' · 트레일링 ATR×' + p.trailAtr : ''}${p.timeBars ? ' · 시간 손절 ' + p.timeBars + '봉' : ''}${p.half ? ' · 1R 절반 익절' : ''} · 전략 버전 ${esc(r.version)}</li></ul></details>`;
 }
 function btReport(r, ctx, p) {

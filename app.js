@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.4.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -236,7 +236,7 @@ async function viewAdd() {
     const c = CATS[cat];
     const nm = await needMsg(cat);
     const remote = cat === 'us' || cat === 'kr'; // 입력해야 찾는(스크립트 경유) 카테고리
-    const manual = cat === 'ffut' || (cat === 'kr' && (nm || (await krSource()) === 'kis'));
+    const manual = cat === 'ffut' || (cat === 'kr' && (nm || ((await krSource()) === 'kis' && !(await KV.get('relayStatus', {})).naver)));
     view().innerHTML = `${catChips(cat, false)}
       ${nm ? `<div class="card warnlist" style="margin-top:0">🔑 ${esc(nm)}. 종목은 미리 추가해 둘 수 있습니다. <a href="#/settings">설정 ›</a></div>` : ''}
       <div class="card">${manual ? `
