@@ -28,7 +28,7 @@ const FRESH = { day: 30 * 60e3, week: 6 * 3600e3, h4: 10 * 60e3, h1: 5 * 60e3, m
 // 처음 고르는 봉(목록에서 맨 앞이 15분봉이어도 기본은 일봉)
 const defTf = (cat) => (CATS[cat].tfs.includes('day') ? 'day' : CATS[cat].tfs[0]);
 const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', naver: '알림 스크립트 v15 이상(네이버 중계)' };
-// 국내주식 출처: 항상 네이버(2026-11-28 사용자 결정). 네이버가 실패할 때만 한투 → 공공데이터로 예비
+// 국내주식 출처: 항상 네이버(2026-11-28 사용자 결정). 네이버가 실패할 때만 한투 키가 있으면 한투로 예비(공공데이터는 삭제)
 async function krSource() { return 'naver'; }
 // 일봉 → 주봉(월요일 시작 주로 묶기)
 function toWeekly(cs) {
@@ -208,10 +208,9 @@ async function fetchCandles0(a, tf) {
       const cs = d.candles || []; if (!cs.length) throw new Error('네이버에서 봉을 받지 못했습니다');
       const out = tf === 'week' ? toWeekly(cs) : cs; out.src = '네이버(비공식)'; return out;
     } catch (e) { err = e; }
-    // 네이버가 안 될 때만 예비: 한투 키 → 공공데이터
+    // 네이버가 안 될 때만 예비: 한투 키
     const st = await KV.get('relayStatus', {});
     if (st.kis) { try { const d = await relay('kis', { kind: 'krCandles', code: a.sym, period: tf === 'week' ? 'W' : 'D' }); if ((d.candles || []).length) { d.candles.src = '한국투자증권(네이버 대신)'; return d.candles; } } catch { /* 공공데이터로 */ } }
-    if (st.krx) { try { const d = await relay('krx', { kind: 'candles', code: a.sym }); const cs = d.candles || []; if (cs.length) { const out = tf === 'week' ? toWeekly(cs) : cs; out.src = '공공데이터(네이버 대신)'; return out; } } catch { /* 처음 오류로 */ } }
     throw err;
   }
   if (a.cat === 'ffut') {

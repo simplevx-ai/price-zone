@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.9.0';
+const APP_VERSION = '3.9.1';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -299,7 +299,7 @@ async function viewAsset(cat, sym) {
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
     <div id="xpa"></div><div id="xmtf"></div>${cat === 'us' || cat === 'kr' ? '<div id="xearn"></div>' : ''}
     ${cat === 'kr' ? '<div id="krInfo"></div>' : ''}
-    <div class="disc" id="srcLine">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : cat === 'kr' && (await krSource()) === 'naver' ? '<br>출처: 네이버 증권(공식 API가 아닌 공개 주소 — 스크립트가 중계, 바뀌면 멈출 수 있음)' : ''}</div>`;
+    <div class="disc" id="srcLine">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'naver' ? '<br>출처: 네이버 증권(공식 API가 아닌 공개 주소 — 스크립트가 중계, 바뀌면 멈출 수 있음)' : ''}</div>`;
   if (cat === 'kr' && (await krSource()) === 'naver') krInfoCard(sym).catch(() => {});
   const save = async (patch) => { const ws = await getWatch(); const i = ws.findIndex((x) => x.cat === cat && x.sym === sym); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await setWatch(ws); } };
   view().querySelectorAll('[name=tf]').forEach((el) => { el.onchange = async () => { await save({ tf: el.value }); render(); }; });
@@ -415,8 +415,8 @@ async function viewSettings() {
       ${stRow(true, '🪙 코인 — 업비트 공개 시세(키 없음)')}
       ${stRow(true, '⚡ 코인선물 — 바이낸스 공개 시세(키 없음)')}
       ${stRow(st.checkedAt ? !!st.av : null, '🇺🇸 해외주식 — Alpha Vantage (속성 ALPHAVANTAGE_API_KEY)')}
-      ${stRow(st.checkedAt ? !!(st.krx || st.kis) : null, '🇰🇷 국내주식 — 공공데이터포털 (속성 DATA_GO_KR_KEY, 하루 1번 갱신) 또는 한국투자증권')}
-      ${stRow(st.checkedAt ? !!st.kis : null, '🌐 해외선물 — 한국투자증권 (속성 KIS_APP_KEY·KIS_APP_SECRET)')}
+      ${stRow(st.checkedAt ? !!st.naver : null, '🇰🇷 국내주식 — 네이버 증권(키 없음, 스크립트가 중계)')}
+      ${stRow(true, '🌐 해외선물 — OKX 같은 기초자산 무기한으로 대신' + (st.kis ? ' · 한투 키 ✅(CME 월물 일봉)' : ' (한투 키 KIS_APP_KEY·KIS_APP_SECRET를 넣으면 CME 월물 일봉)'))}
       ${stRow(st.checkedAt ? !!st.ai : null, '🤖 AI 분석 — Claude API (속성 ANTHROPIC_API_KEY)' + (st.aiToday && st.aiToday.day ? ` · 오늘 ${st.aiToday.calls}/${st.aiCap || 130}번` : ''))}
       <div class="muted" style="font-size:12px;margin-top:6px">❔는 아직 연결 확인 전입니다. 키는 Apps Script → 프로젝트 설정 → 스크립트 속성에 직접 넣으세요.</div></div>
     <div class="card"><h2>알아 두기</h2><ul class="steps">
@@ -434,8 +434,8 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, naver: !!d.naver, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null, scan: d.scan || null });
-      res(`<div class="${d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.discord ? '✅' : '⚠️'} 연결됨 · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 9 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — ETF 아침 정리·나스닥 신호 알림·AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, naver: !!d.naver, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null, scan: d.scan || null });
+      res(`<div class="${d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.discord ? '✅' : '⚠️'} 연결됨 · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 9 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — ETF 아침 정리·나스닥 신호 알림·AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
   };
