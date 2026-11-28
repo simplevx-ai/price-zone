@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -292,7 +292,9 @@ async function viewAsset(cat, sym) {
     <div class="card"><div class="row spread"><b>🔔 알림 (텔레그램·디스코드)</b><label class="row" style="margin:0;color:var(--ink)"><input type="checkbox" id="al" ${w.alert ? 'checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
       <div class="muted" style="font-size:13px;margin-top:4px">가격이 위 검토 구간에 들어오면 알려 줍니다. ${cat === 'us' ? '해외주식은 무료 키 한도 때문에 3시간마다 확인합니다.' : '10분마다 확인합니다.'} 구간은 앱을 열 때(6시간마다), 그리고 스크립트가 매일 14시 이후 한 번 스스로 다시 계산합니다.</div></div>
     ${inList ? '<button class="btn block danger" id="del" type="button">관심 종목에서 빼기</button>' : '<button class="btn block primary" id="addw" type="button">관심 종목에 추가</button>'}
-    <div class="disc" id="srcLine">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : ''}</div>`;
+    ${cat === 'kr' ? '<div id="krInfo"></div>' : ''}
+    <div class="disc" id="srcLine">공부용 · 매수 추천 아님 · ${CATS[cat].label}${cat === 'kr' && (await krSource()) === 'krx' ? '<br>출처: 금융위원회(공공데이터포털) · 전 영업일 종가까지(하루 1번 갱신)' : cat === 'kr' && (await krSource()) === 'naver' ? '<br>출처: 네이버 증권(공식 API가 아닌 공개 주소 — 스크립트가 중계, 바뀌면 멈출 수 있음)' : ''}</div>`;
+  if (cat === 'kr' && (await krSource()) === 'naver') krInfoCard(sym).catch(() => {});
   const save = async (patch) => { const ws = await getWatch(); const i = ws.findIndex((x) => x.cat === cat && x.sym === sym); if (i >= 0) { ws[i] = { ...ws[i], ...patch }; await setWatch(ws); } };
   view().querySelectorAll('[name=tf]').forEach((el) => { el.onchange = async () => { await save({ tf: el.value }); render(); }; });
   if ($('#del')) $('#del').onclick = async () => { if (!confirm(`${w.name}을(를) 관심 종목에서 뺄까요?`)) return; await removeWatch(cat, sym); location.hash = '#/'; };
@@ -423,7 +425,7 @@ async function viewSettings() {
     res('<div class="muted">확인 중…</div>');
     try {
       const d = await relay('ping');
-      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null, scan: d.scan || null });
+      await KV.set('relayStatus', { checkedAt: nowISO(), av: !!d.av, kis: !!d.kis, krx: !!d.krx, naver: !!d.naver, telegram: !!d.telegram, discord: !!d.discord, version: d.version, recalc: d.recalc || null, ai: !!d.ai, aiToday: d.aiToday || null, aiCap: d.aiCap || null, nq: d.nq || null, scan: d.scan || null });
       res(`<div class="${d.telegram || d.discord ? 'okbox' : 'warnlist'}" style="margin-top:0">${d.telegram || d.discord ? '✅' : '⚠️'} 연결됨 · 텔레그램 ${d.telegram ? '✅' : '—'} · 디스코드 ${d.discord ? '✅' : '—'} · 해외주식 키 ${d.av ? '✅' : '—'} · 공공데이터 키 ${d.krx ? '✅' : '—'} · 한투 키 ${d.kis ? '✅' : '—'} · Claude 키 ${d.ai ? '✅' : '—'} · 자동 확인 ${d.trigger ? '켜짐' : '<span style="color:var(--red)">꺼짐</span>'} · 알림 종목 ${d.watching}개${(d.version || 0) < 9 ? '<br><span style="color:var(--red)">스크립트가 옛 버전입니다 — ETF 아침 정리·나스닥 신호 알림·AI 분석·구간 자동 재계산을 쓰려면 새 코드로 바꾸고 새 버전 배포가 필요합니다</span>' : ''}</div>`);
       setTimeout(render, 1500);
     } catch (e) { res(`<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`); }
@@ -446,3 +448,25 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
   });
 }
 render();
+
+/* 🇰🇷 국내주식 종목 정보(네이버 중계): 지금가·PER·PBR·52주·증권사 목표가 평균·외국인/기관 순매수 5일 */
+async function krInfoCard(code) {
+  const host = $('#krInfo'); if (!host) return;
+  host.innerHTML = '<div class="card"><div class="muted">네이버 종목 정보 받는 중…</div></div>';
+  let d; try { d = await relay('naver', { kind: 'info', code }); } catch (e) { if (host.isConnected) host.innerHTML = `<div class="card errbox">${esc(e.message)}</div>`; return; }
+  if (!host.isConnected) return;
+  const I = d.info || {}, q = d.quote, c = d.consensus, T = d.trend || [];
+  const n = (x) => (x > 0 ? '+' : '') + Math.round(x).toLocaleString('ko-KR');
+  const sum = (k) => T.reduce((a, x) => a + x[k], 0);
+  const tgt = c && c.priceTargetMean ? Number(String(c.priceTargetMean).replace(/,/g, '')) : null;
+  host.innerHTML = `<div class="card"><h2>🇰🇷 종목 정보 <span class="muted">(네이버 증권)</span></h2>
+    ${q ? `<div class="row spread"><span>지금가 ${q.status === 'OPEN' ? '(장중)' : '(장 마감)'}</span><b style="font-size:18px" class="${q.chg > 0 ? 'up' : q.chg < 0 ? 'down' : ''}">${q.price.toLocaleString('ko-KR')}원 ${pct(q.chg)}</b></div>` : ''}
+    <div class="grid2" style="font-size:13px;margin-top:6px">
+      <div>PER <b>${esc(I.per || '-')}</b></div><div>PBR <b>${esc(I.pbr || '-')}</b></div>
+      <div>52주 최고 <b>${esc(I.highPriceOf52Weeks || '-')}</b></div><div>52주 최저 <b>${esc(I.lowPriceOf52Weeks || '-')}</b></div>
+      <div>시가총액 <b>${esc(I.marketValue || '-')}</b></div><div>외국인 소진율 <b>${esc(I.foreignRate || '-')}</b></div>
+      ${tgt ? `<div>증권사 목표가 평균 <b>${tgt.toLocaleString('ko-KR')}원</b>${q ? ` <span class="muted">(지금가 대비 ${pct((tgt / q.price - 1) * 100, 1)})</span>` : ''}</div><div>투자의견 평균 <b>${esc(c.recommMean || '-')}</b> <span class="muted">/5</span></div>` : ''}</div>
+    ${T.length ? `<h4>최근 ${T.length}거래일 수급(주)</h4><div class="tblwrap"><table class="md" style="font-size:13px"><thead><tr><th>날짜</th><th>외국인</th><th>기관</th><th>개인</th><th>외국인 보유</th></tr></thead><tbody>${T.map((x) => `<tr><td>${x.day.slice(4, 6)}/${x.day.slice(6, 8)}</td><td class="${x.foreign > 0 ? 'up' : 'down'}">${n(x.foreign)}</td><td class="${x.organ > 0 ? 'up' : 'down'}">${n(x.organ)}</td><td>${n(x.indiv)}</td><td>${esc(x.hold)}</td></tr>`).join('')}</tbody></table></div>
+      <div style="font-size:13px;margin-top:4px">${T.length}일 합계: 외국인 <b class="${sum('foreign') > 0 ? 'up' : 'down'}">${n(sum('foreign'))}</b> · 기관 <b class="${sum('organ') > 0 ? 'up' : 'down'}">${n(sum('organ'))}</b> — ${sum('foreign') > 0 && sum('organ') > 0 ? '외국인·기관 함께 사는 중' : sum('foreign') < 0 && sum('organ') < 0 ? '외국인·기관 함께 파는 중' : '외국인·기관 방향이 엇갈림'}</div>` : ''}
+    <div class="muted" style="font-size:11px;margin-top:4px">네이버 증권 공개 주소(공식 API 아님)를 스크립트가 받아 옴 · 목표가는 증권사 의견 평균일 뿐 예측이 아님</div></div>`;
+}

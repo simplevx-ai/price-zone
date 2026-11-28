@@ -11,7 +11,7 @@
 'use strict';
 
 const CATS = {
-  kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'krx|kis', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
+  kr: { label: '국내주식', icon: '🇰🇷', tfs: ['day', 'week'], unit: '원', needs: 'krx|kis|naver', hint: '종목 이름이나 코드(예: 삼성전자, 005930)' },
   us: { label: '해외주식', icon: '🇺🇸', tfs: ['day', 'week'], unit: '$', needs: 'av', hint: '티커(예: AAPL, NVDA)' },
   // 봉 순서는 앱 전체에서 짧은 것부터: 15분 · 30분 · 1시간 · 4시간 · 일봉 (· 주봉)
   coin: { label: '코인', icon: '🪙', tfs: ['m15', 'm30', 'h1', 'h4', 'day'], unit: '원' },
@@ -26,9 +26,10 @@ const TFS = {
 const FRESH = { day: 30 * 60e3, week: 6 * 3600e3, h4: 10 * 60e3, h1: 5 * 60e3, m30: 3 * 60e3, m15: 2 * 60e3 };
 // 처음 고르는 봉(목록에서 맨 앞이 15분봉이어도 기본은 일봉)
 const defTf = (cat) => (CATS[cat].tfs.includes('day') ? 'day' : CATS[cat].tfs[0]);
-const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', 'krx|kis': '공공데이터 서비스키(또는 한국투자증권 키)' };
+const NEED_LABEL = { kis: '한국투자증권 키', av: 'Alpha Vantage 키', 'krx|kis': '공공데이터 서비스키(또는 한국투자증권 키)', 'krx|kis|naver': '알림 스크립트 v15(네이버 중계) 또는 한국투자증권 키' };
 // 국내주식 출처: 한투 키가 있으면 한투(장중 시세), 없으면 공공데이터(전 영업일까지)
-async function krSource() { const st = await KV.get('relayStatus', {}); return st.kis ? 'kis' : 'krx'; }
+// 국내주식 출처: 한국투자증권 키 > 네이버(스크립트 v15, 키 없음·비공식 공개 주소) > 공공데이터(전 영업일 종가)
+async function krSource() { const st = await KV.get('relayStatus', {}); return st.kis ? 'kis' : st.naver ? 'naver' : 'krx'; }
 // 일봉 → 주봉(월요일 시작 주로 묶기)
 function toWeekly(cs) {
   const out = [];
@@ -200,6 +201,11 @@ async function fetchCandles0(a, tf) {
     // 알파밴티지 한도·오류 → 같은 종목 무기한 선물 봉으로 대신(OKX → 바이비트)
     try { const cs = await perpCandles(a.sym, 'day'); const out = tf === 'week' ? toWeekly(cs) : cs; out.src = cs.src + '(Alpha Vantage 대신)'; return out; } catch { throw avErr; }
   }
+  if (a.cat === 'kr' && (await krSource()) === 'naver') {
+    const d = await relay('naver', { kind: 'candles', code: a.sym, days: 900 });
+    const cs = d.candles || []; if (!cs.length) throw new Error('네이버에서 봉을 받지 못했습니다');
+    const out = tf === 'week' ? toWeekly(cs) : cs; out.src = '네이버(비공식)'; return out;
+  }
   if (a.cat === 'kr' && (await krSource()) === 'krx') {
     const d = await relay('krx', { kind: 'candles', code: a.sym });
     const cs = d.candles || [];
@@ -243,7 +249,7 @@ async function searchAssets(cat, q) {
   }
   if (cat === 'kr') {
     if (!q) return [];
-    return (await relay('krx', { kind: 'search', q })).items || [];
+    return (await relay((await krSource()) === 'naver' ? 'naver' : 'krx', { kind: 'search', q })).items || [];
   }
   return [];
 }

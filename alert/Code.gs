@@ -26,7 +26,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 14;
+const VERSION = 15;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -43,12 +43,13 @@ function doPost(e) {
     if (d.action === 'ping') {
       return json_({ ok: true, version: VERSION, telegram: !!(P.getProperty('TELEGRAM_BOT_TOKEN') && P.getProperty('TELEGRAM_CHAT_ID')), discord: !!discordUrl_(),
         av: !!P.getProperty('ALPHAVANTAGE_API_KEY'), kis: !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')), krx: !!P.getProperty('DATA_GO_KR_KEY'), trigger: hasTrigger_(), watching: watch_().length, recalc: watchMeta_().recalc || null,
-        ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_(), coinStrong: coinStrongStatus_() });
+        naver: true, ai: !!P.getProperty('ANTHROPIC_API_KEY'), aiModel: AI_MODEL_, aiToday: aiUsage_(), aiCap: aiCap_(), nq: nqStatus_(), scan: scanStatus_(), strong: strongStatus_(), coinStrong: coinStrongStatus_() });
     }
     if (d.action === 'upbit') return json_(upbitRelay_(String(d.path || '')));
     if (d.action === 'av') return json_(avRelay_(d));
     if (d.action === 'kis') return json_(kisRelay_(d));
     if (d.action === 'krx') return json_(krxRelay_(d));
+    if (d.action === 'naver') return json_(naverRelay_(d));
     if (d.action === 'claude') return json_(claudeRelay_(d));
     if (d.action === 'saveScan') { P.setProperty('SCAN_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'saveCoinStrong') { P.setProperty('COIN_STRONG_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
@@ -119,8 +120,12 @@ function 가격확인() {
     P.setProperty('LAST_US', String(now));
   }
   // 국내주식: 공공데이터(전 영업일 종가, 한투 키가 없을 때)
+  if (!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'))) {
+    const krs = items.filter((x) => x.cat === 'kr');
+    if (krs.length) { try { const q = naverQuotes_(krs.map((x) => x.sym)); krs.forEach((x) => { if (q[x.sym]) { price['kr:' + x.sym] = q[x.sym].price; srcOf['kr:' + x.sym] = '네이버'; } }); } catch (e) { /* 공공데이터로 */ } }
+  }
   if (P.getProperty('DATA_GO_KR_KEY') && !(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'))) {
-    items.filter((x) => x.cat === 'kr').forEach((x) => { try { const cs = krxCandlesCached_(x.sym); if (cs.length) price['kr:' + x.sym] = cs[cs.length - 1].c; } catch (e) { /* 다음에 */ } });
+    items.filter((x) => x.cat === 'kr' && !price['kr:' + x.sym]).forEach((x) => { try { const cs = krxCandlesCached_(x.sym); if (cs.length) price['kr:' + x.sym] = cs[cs.length - 1].c; } catch (e) { /* 다음에 */ } });
   }
   // 국내주식·해외선물: 한국투자증권
   if (P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET')) {
@@ -179,6 +184,65 @@ function zoneAlertText_(x, z, i, p, unit, src) {
   if (x.calcAt) sub.push('구간 계산 ' + Utilities.formatDate(new Date(x.calcAt), 'Asia/Seoul', 'M/d HH:mm') + (x.rc ? '(자동)' : '(앱)'));
   if (sub.length) L.push('-# ' + sub.join(' · '));
   return L.join('\n');
+}
+
+/* ───────── 🇰🇷 네이버 증권(비공식 공개 주소 — 약관상 공식 API 아님, 바뀌면 멈출 수 있음) ─────────
+ * 브라우저에서 직접 부르면 막혀서(CORS) 스크립트가 대신 받는다. 정해진 주소 모양만 허용. */
+const NV_UA_ = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://m.stock.naver.com/' };
+const nvNum_ = (v) => Number(String(v == null ? '' : v).replace(/[,+%배원]/g, '')) || 0;
+function naverJson_(url) {
+  const r = fetchRetry_(url, { headers: NV_UA_ });
+  if (r.getResponseCode() !== 200) throw new Error('네이버 응답 ' + r.getResponseCode());
+  return JSON.parse(r.getContentText());
+}
+// 일봉(오래된 것부터). days일 전부터 오늘까지
+function naverCandles_(code, days) {
+  if (!/^[0-9A-Z]{6}$/.test(code)) throw new Error('종목코드 모양이 아닙니다');
+  const ck = 'nvc_' + code, cache = CacheService.getScriptCache(), hit = cache.get(ck);
+  if (hit) return JSON.parse(hit);
+  const f = (t) => Utilities.formatDate(new Date(t), 'Asia/Seoul', 'yyyyMMdd');
+  const j = naverJson_('https://api.stock.naver.com/chart/domestic/item/' + code + '/day?startDateTime=' + f(Date.now() - (days || 730) * 86400e3) + '0000&endDateTime=' + f(Date.now()) + '2359');
+  const cs = (Array.isArray(j) ? j : []).map((k) => ({ t: Date.parse(k.localDate.slice(0, 4) + '-' + k.localDate.slice(4, 6) + '-' + k.localDate.slice(6, 8) + 'T00:00:00+09:00'), o: +k.openPrice, h: +k.highPrice, l: +k.lowPrice, c: +k.closePrice, v: +k.accumulatedTradingVolume })).filter((k) => k.c > 0);
+  const txt = JSON.stringify(cs); if (txt.length < 95000) cache.put(ck, txt, 600);
+  return cs;
+}
+// 지금가 여러 개 { code: { price, chg, status, at } }
+function naverQuotes_(codes) {
+  const L = codes.filter((c) => /^[0-9A-Z]{6}$/.test(c)).slice(0, 40); if (!L.length) return {};
+  const j = naverJson_('https://polling.finance.naver.com/api/realtime/domestic/stock/' + L.join(','));
+  const out = {}; (j.datas || []).forEach((x) => { out[x.itemCode] = { name: x.stockName, price: nvNum_(x.closePrice), chg: nvNum_(x.fluctuationsRatio) * (x.compareToPreviousPrice && x.compareToPreviousPrice.code === '5' ? -1 : 1), status: x.marketStatus, at: x.localTradedAt }; });
+  return out;
+}
+function naverIndex_() {
+  return ['KOSPI', 'KOSDAQ'].map((k) => { const j = naverJson_('https://m.stock.naver.com/api/index/' + k + '/basic'); const down = j.compareToPreviousPrice && j.compareToPreviousPrice.code === '5'; return { code: k, name: j.stockName || k, price: j.closePrice, chg: (down ? '-' : '+') + String(j.fluctuationsRatio || '0').replace('-', ''), status: j.marketStatus }; });
+}
+function naverRelay_(d) {
+  try {
+    const code = String(d.code || '').toUpperCase();
+    if (d.kind === 'candles') return { ok: true, candles: naverCandles_(code, Math.min(1500, Number(d.days) || 730)), src: '네이버' };
+    if (d.kind === 'quotes') return { ok: true, quotes: naverQuotes_(String(d.codes || '').toUpperCase().split(',')) };
+    if (d.kind === 'search') {
+      const q = String(d.q || '').slice(0, 30); if (!q) return { ok: true, items: [] };
+      const j = naverJson_('https://ac.stock.naver.com/ac?q=' + encodeURIComponent(q) + '&target=stock');
+      return { ok: true, items: (j.items || []).filter((x) => x.nationCode === 'KOR' && /^[0-9A-Z]{6}$/.test(x.code)).slice(0, 15).map((x) => ({ sym: x.code, name: x.name, sub: x.code + ' · ' + (x.typeName || '') })) };
+    }
+    if (d.kind === 'info') { // 종목 정보 + 수급(최근 5일) + 지금가
+      if (!/^[0-9A-Z]{6}$/.test(code)) return { ok: false, error: '종목코드 모양이 아닙니다' };
+      const it = naverJson_('https://m.stock.naver.com/api/stock/' + code + '/integration'), tr = naverJson_('https://m.stock.naver.com/api/stock/' + code + '/trend?pageSize=5');
+      const info = {}; (it.totalInfos || []).forEach((x) => { info[x.code] = x.value; });
+      const q = naverQuotes_([code])[code] || null;
+      return { ok: true, name: it.stockName, quote: q, info: info, consensus: it.consensusInfo || null,
+        trend: (Array.isArray(tr) ? tr : []).map((x) => ({ day: x.bizdate, foreign: nvNum_(x.foreignerPureBuyQuant), organ: nvNum_(x.organPureBuyQuant), indiv: nvNum_(x.individualPureBuyQuant), hold: x.foreignerHoldRatio, close: nvNum_(x.closePrice) })) };
+    }
+    if (d.kind === 'index') return { ok: true, index: naverIndex_() };
+    if (d.kind === 'fx') { const j = naverJson_('https://m.stock.naver.com/front-api/marketIndex/productDetail?category=exchange&reutersCode=FX_USDKRW'); return { ok: true, usdkrw: nvNum_(j.result && j.result.closePrice), at: j.result && j.result.localTradedAt }; }
+    return { ok: false, error: '모르는 요청' };
+  } catch (e) { return { ok: false, error: '네이버: ' + e.message }; }
+}
+/** 편집기에서 실행: 네이버 연결 점검(삼성전자 일봉·지금가·지수·환율) */
+function 네이버점검() {
+  const cs = naverCandles_('005930', 30), q = naverQuotes_(['005930']), ix = naverIndex_(), fx = naverRelay_({ kind: 'fx' });
+  Logger.log('일봉 ' + cs.length + '개(마지막 ' + (cs.length ? Utilities.formatDate(new Date(cs[cs.length - 1].t), 'Asia/Seoul', 'M/d') + ' 종가 ' + cs[cs.length - 1].c : '-') + ') · 지금가 ' + JSON.stringify(q['005930']) + ' · 지수 ' + JSON.stringify(ix) + ' · 원/달러 ' + fx.usdkrw);
 }
 
 /* ───────── 구간 자동 재계산: 앱(zones.js)과 같은 계산식으로 스크립트가 직접 계산 ───────── */
@@ -315,7 +379,8 @@ function serverCandles0_(x) {
   const P = PropertiesService.getScriptProperties(), kis = !!(P.getProperty('KIS_APP_KEY') && P.getProperty('KIS_APP_SECRET'));
   if (x.cat === 'kr') {
     if (kis) return krCandles_(x.sym, tf === 'week' ? 'W' : 'D');
-    if (!P.getProperty('DATA_GO_KR_KEY')) throw new Error('DATA_GO_KR_KEY 없음');
+    try { const nc = naverCandles_(x.sym, 730); if (nc.length >= 60) { const o = tf === 'week' ? toWeekly_(nc) : nc; o.src = '네이버'; return o; } } catch (e) { /* 공공데이터로 */ }
+    if (!P.getProperty('DATA_GO_KR_KEY')) throw new Error('네이버 봉을 못 받았고 DATA_GO_KR_KEY도 없음');
     const cs = krxCandlesCached_(x.sym);
     return tf === 'week' ? toWeekly_(cs) : cs;
   }
@@ -456,6 +521,7 @@ function scanBuild_() {
   const L = [];
   L.push('## 📊 ETF 선물 아침 정리 · ' + Utilities.formatDate(new Date(), 'Asia/Seoul', 'M/d HH:mm'));
   L.push('**📌 시장 기준**');
+  try { const ix = naverIndex_(); if (ix.length) L.push('• ' + ix.map((x) => '**' + x.name + '** ' + x.price + ' (' + x.chg + '%)').join(' · ') + ' — 한국 지수(네이버, 직전 장)'); } catch (e) { /* 지수 없이 */ }
   ['QQQ', 'SPY'].forEach((x) => { const r = R.filter((y) => y.s === x)[0]; if (r && r.d) L.push('• **' + x + '** ' + f(r.d.price) + ' (' + pc(r.tk.chg) + ') · RSI ' + r.d.rsi.toFixed(0) + ' · ' + SCAN.dayTrend(r.d)); });
   const up = R.filter((r) => r.a.upScore >= 3).sort((p, q) => q.a.upScore - p.a.upScore || q.tk.vol - p.tk.vol).slice(0, 5);
   const dn = R.filter((r) => r.a.dnScore >= 3).sort((p, q) => q.a.dnScore - p.a.dnScore || q.tk.vol - p.tk.vol).slice(0, 5);
