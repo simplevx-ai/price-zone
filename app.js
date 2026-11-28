@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.6.1';
+const APP_VERSION = '3.6.2';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -424,7 +424,7 @@ async function viewSettings() {
       <li>구간과 알림은 공부용입니다. 매수 추천이 아니며 결정과 책임은 본인에게 있습니다.</li>
       <li>Alpha Vantage 무료 키는 하루 25번 정도만 부를 수 있어, 해외주식은 6시간마다 새로 받고 알림은 3시간마다 확인합니다.</li>
       <li>관심 종목과 설정은 이 폰에만 저장됩니다.</li></ul></div>
-    <div class="card"><h2>앱 정보</h2><div class="muted">AI 마켓 스캐너 v${APP_VERSION} (옛 이름: 가격 위치)<br>폰 홈 화면에 추가: 크롬 ⋮ → '홈 화면에 추가' 또는 '앱 설치'</div></div>`;
+    <div class="card"><h2>앱 정보</h2><div class="muted">AI 마켓 스캐너 v${APP_VERSION} (옛 이름: 가격 위치)<br>폰 홈 화면에 추가: 크롬 ⋮ → '홈 화면에 추가' 또는 '앱 설치'</div>${updButton(APP_VERSION)}</div>`;
   const res = (html) => { $('#r_res').innerHTML = html; };
   $('#r_save').onclick = async () => {
     const url = $('#r_url').value.trim(), key = $('#r_key').value.trim();
