@@ -252,7 +252,7 @@ function paSoundStart(app) {
 }
 
 /* ── 📰 코인 속보(알림 스크립트 v20 — CoinNess 공개 피드, 공식 API 아님) ── */
-const NEWS_HOT = /상장폐지|상폐|해킹|탈취|ETF|SEC|연준|FOMC|금리|청산|디페깅|파산|소송|규제|승인|급등|급락|폭락|고래|입금|출금|바이낸스|업비트|빗썸/;
+const NEWS_HOT = /상장폐지|상폐|해킹|탈취|ETF|SEC|연준|FOMC|금리|청산|디페깅|파산|소송|규제|승인|급등|급락|폭락|고래|대량 입금|대량 출금/;
 async function newsCard(host) {
   if (!host) return;
   if (!(await relayOn())) { host.innerHTML = '<div class="card muted" style="font-size:12px">📰 코인 속보: 계산기 탭에서 알림 스크립트를 연결하면 실시간 한국어 속보가 나옵니다.</div>'; return; }
