@@ -336,8 +336,18 @@ function toWeekly_(cs) {
 
 
 /* ───────── 📡 나스닥 신호: OKX 공개 시세 → nq.js 규칙(앱과 같은 계산) → 바뀔 때만 알림. 주문 기능 없음 ───────── */
+// 짧은 재시도: 연결 오류(예외)·429·5xx면 0.7초 쉬고 한 번 더(Apps Script UrlFetchApp는 시간 제한을 정할 수 없어 횟수로만 막음)
+function fetchRetry_(url, opt) {
+  const o = Object.assign({ muteHttpExceptions: true }, opt || {});
+  let r = null;
+  for (let i = 0; i < 2; i++) {
+    try { r = UrlFetchApp.fetch(url, o); const c = r.getResponseCode(); if (c !== 429 && c < 500) return r; } catch (e) { if (i) throw e; }
+    Utilities.sleep(700);
+  }
+  return r;
+}
 function okx_(path) {
-  const r = UrlFetchApp.fetch('https://www.okx.com/api/v5' + path, { muteHttpExceptions: true });
+  const r = fetchRetry_('https://www.okx.com/api/v5' + path);
   const j = JSON.parse(r.getContentText() || '{}');
   if (r.getResponseCode() !== 200 || j.code !== '0') throw new Error('OKX 응답 오류 ' + r.getResponseCode() + ' ' + (j.msg || ''));
   return j.data || [];
@@ -512,6 +522,9 @@ function okxMany_(paths) {
     rs.forEach((r) => { try { const j = JSON.parse(r.getContentText() || '{}'); out.push(r.getResponseCode() === 200 && j.code === '0' ? j.data : null); } catch (e) { out.push(null); } });
     if (i + 8 < paths.length) Utilities.sleep(500);
   }
+  // 못 받은 것만 한 번 더(일시적인 429·연결 오류 대비)
+  const miss = out.map((x, k) => (x ? -1 : k)).filter((k) => k >= 0);
+  if (miss.length && miss.length <= 12) { Utilities.sleep(800); miss.forEach((k) => { try { const r = fetchRetry_('https://www.okx.com/api/v5' + paths[k]); const j = JSON.parse(r.getContentText() || '{}'); if (r.getResponseCode() === 200 && j.code === '0') out[k] = j.data; } catch (e) { /* 다음 시간에 */ } }); }
   return out;
 }
 // 바이비트 봉(OKX에서 못 받았을 때만). 구글 서버에서 막히면 null
@@ -1299,13 +1312,13 @@ function bithumbGet_(path) {
   const ok = /^\/candles\/(days|minutes\/240|minutes\/60|minutes\/30|minutes\/15)\?market=KRW-[A-Z0-9]+&count=\d{1,3}(&to=[0-9A-Za-z%:.-]+)?$/.test(path) || /^\/ticker\?markets=KRW-[A-Z0-9]+(,KRW-[A-Z0-9]+){0,29}$/.test(path);
   if (!ok) return { ok: false, error: '허용하지 않는 빗썸 주소입니다' };
   try {
-    const r = UrlFetchApp.fetch('https://api.bithumb.com/v1' + path, { muteHttpExceptions: true });
+    const r = fetchRetry_('https://api.bithumb.com/v1' + path);
     if (r.getResponseCode() !== 200) return { ok: false, error: '빗썸 응답 ' + r.getResponseCode() };
     const d = JSON.parse(r.getContentText()); return Array.isArray(d) ? { ok: true, data: d } : { ok: false, error: '빗썸 응답 이상' };
   } catch (e) { return { ok: false, error: '빗썸 연결 실패' }; }
 }
 function bybitPrice_(sym) {
-  try { const r = UrlFetchApp.fetch('https://api.bybit.com/v5/market/tickers?category=linear&symbol=' + encodeURIComponent(sym), { muteHttpExceptions: true }); if (r.getResponseCode() !== 200) return 0; const j = JSON.parse(r.getContentText()); const t = j.result && j.result.list && j.result.list[0]; return t ? Number(t.lastPrice) || 0 : 0; } catch (e) { return 0; }
+  try { const r = fetchRetry_('https://api.bybit.com/v5/market/tickers?category=linear&symbol=' + encodeURIComponent(sym)); if (r.getResponseCode() !== 200) return 0; const j = JSON.parse(r.getContentText()); const t = j.result && j.result.list && j.result.list[0]; return t ? Number(t.lastPrice) || 0 : 0; } catch (e) { return 0; }
 }
 // 기초 이름(BTC, NVDA 등)의 무기한 선물 봉: OKX → 바이비트(끝난 봉만, 오래된 것부터)
 function perpCandles_(base, tf) {

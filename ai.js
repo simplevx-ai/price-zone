@@ -369,6 +369,7 @@ async function viewAiHome() {
 
 /* ───────── 화면: 종목별 시작 ───────── */
 async function viewAiAsset(cat, sym) {
+  const live = liveNow();
   const watch = await getWatch();
   const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: aiNameOf(cat, sym) };
   setTitle(`🤖 ${w.name}`, true);
@@ -378,6 +379,7 @@ async function viewAiAsset(cat, sym) {
   const running = idx.find((x) => x.status === 'running' && AIRun.active.has(x.id));
   if (running) { location.hash = `#/air/${enc(running.id)}`; return; }
   const msg = claudeOk ? await aiStatusMsg() : '';
+  if (!live()) return;
   view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">${AI_DISC}</div>
     <div id="freeAi"></div>
     ${claudeOk ? `<div class="card"><h2>🤖 Claude 전문가 팀 자동 분석 <span class="muted">(Claude API 키가 있을 때)</span></h2>

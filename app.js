@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.1.1';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -145,13 +145,17 @@ const routes = [
   [/^#\/bt$/, 'bt', viewBacktest],
   [/^#\/settings$/, 'settings', viewSettings],
 ];
+// 화면이 바뀌면 늦게 끝난 이전 화면이 새 화면을 덮지 않게(느린 연결 대비)
+let viewGen = 0;
+const liveNow = () => { const g = viewGen; return () => g === viewGen; };
 async function render() {
+  const gen = ++viewGen;
   const h = (location.hash || '#/').split('?')[0];
   for (const [re, tab, fn] of routes) {
     const m = h.match(re);
     if (m) {
       document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('on', a.dataset.tab === tab));
-      try { await fn(m); } catch (e) { console.error(e); view().innerHTML = `<div class="card errbox">오류: ${esc(e.message)}</div>`; }
+      try { await fn(m); } catch (e) { console.error(e); if (gen !== viewGen) return; view().innerHTML = `<div class="card errbox">오류: ${esc(e.message)}</div>`; }
       return;
     }
   }
@@ -272,6 +276,7 @@ async function viewAdd() {
 
 /* ───────── 종목 상세: 차트·구간·근거 ───────── */
 async function viewAsset(cat, sym) {
+  const live = liveNow();
   if (!CATS[cat]) { location.hash = '#/'; return; }
   const watch = await getWatch();
   const w = watch.find((x) => x.cat === cat && x.sym === sym) || { cat, sym, name: sym, tf: defTf(cat) };
@@ -302,7 +307,8 @@ async function viewAsset(cat, sym) {
   const nm = await needMsg(cat);
   if (nm) { $('#sum').innerHTML = `<div class="warnlist" style="margin-top:0">🔑 ${esc(nm)}. <a href="#/settings">설정 ›</a></div>`; return; }
   let cs;
-  try { cs = await candles(w, tf); } catch (e) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`; return; }
+  try { cs = await candles(w, tf); } catch (e) { if (!live()) return; $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(e.message)}</div>`; return; }
+  if (!live()) return;
   const r = ZoneMath.analyze(cs, { tf });
   if (r.error) { $('#sum').innerHTML = `<div class="errbox" style="margin-top:0">${esc(r.error)}</div>`; return; }
   const f = (p) => fmtP(p, cat), u = unitOf(cat);
