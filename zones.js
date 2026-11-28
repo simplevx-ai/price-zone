@@ -1,5 +1,5 @@
 /* 가격 위치 — 매수 검토 구간 계산(공부용)
-   여러 근거(지지선·저항→지지 전환·매물대·매물 마디·주봉 지지·이동평균·볼린저·피보나치·RSI 과매도·ATR)가 겹치는 가격대를 찾아 점수를 매기고,
+   여러 근거(지지선·저항→지지 전환·매물대·매물 마디·주봉 지지·AVWAP·거래량 터진 저점·RSI 다이버전스·이동평균·볼린저·피보나치·RSI 과매도·ATR)가 겹치는 가격대를 찾아 점수를 매기고,
    구간마다 과거에 그 가격대에 닿았을 때 실제로 반등했는지(과거 반응)를 세어 함께 보여 준다.
    매수 추천이 아니라 '가격이 어느 위치에 있는지' 공부하기 위한 계산이다.
    입력 candles: 오래된 것부터 [{t, o, h, l, c, v}] */
@@ -101,7 +101,7 @@ const ZoneMath = (() => {
   const LABEL = {
     swing: '지지선', poc: '매물대 중심(POC)', val: '매물대 하단(VAL)', ma60: '60봉 이동평균', ma120: '120봉 이동평균', ma200: '200봉 이동평균',
     bb: '볼린저 밴드 하단', fib382: '피보나치 38.2%', fib500: '피보나치 50%', fib618: '피보나치 61.8%', rsi: 'RSI 과매도 때 가격',
-    flip: '저항→지지 전환', hvn: '매물 마디(HVN)', wk: '주봉 지지선',
+    flip: '저항→지지 전환', hvn: '매물 마디(HVN)', wk: '주봉 지지선', avwap: '저점 기준 평균단가(AVWAP)', vsl: '거래량 터진 저점', div: 'RSI 상승 다이버전스 저점',
   };
   const WHY = {
     swing: '과거에 여러 번 떨어지다 멈추고 반등한 가격입니다. 같은 가격에서 사려는 사람이 많았다는 뜻이라 다시 멈출 수 있습니다.',
@@ -117,6 +117,9 @@ const ZoneMath = (() => {
     rsi: 'RSI(14)가 30 아래(과매도)였던 때의 종가 중간값입니다. 과거에 많이 팔렸던 가격대입니다.',
     flip: '예전에 여러 번 막혔던 고점(저항)을 가격이 뚫고 올라간 자리입니다. 뚫린 저항은 다시 내려올 때 지지가 되는 경우가 많습니다(역할 전환).',
     hvn: 'POC 말고도 거래가 유난히 많이 쌓인 가격 마디입니다(평균의 1.3배 이상). 많은 사람이 사고판 가격이라 멈추기 쉽습니다.',
+    avwap: '최근 큰 저점부터 지금까지 거래량을 반영한 평균 매수 단가입니다. 저점 이후 산 사람들의 본전 가격이라 내려오면 지지가 되기 쉽습니다.',
+    vsl: '평소(20봉 평균)보다 거래량이 2배 넘게 터지면서 만들어진 저점입니다. 많은 물량이 주인을 바꾼 가격이라 다시 지지될 가능성이 높습니다.',
+    div: '가격은 더 낮은 저점을 만들었는데 RSI는 더 높은 저점을 만든 자리(상승 다이버전스)입니다. 파는 힘이 약해졌다는 신호로 봅니다.',
     wk: '일봉을 주봉으로 묶어 찾은 주봉 저점입니다. 더 큰 단위에서도 멈췄던 가격이라 일봉 지지선보다 무게가 있습니다.',
   };
 
@@ -179,6 +182,13 @@ const ZoneMath = (() => {
       if (wk.length >= 20) for (const s2 of swingLows(wk, 3)) if (s2.p < price) add('wk', s2.p);
     }
 
+    // 10) 저점 기준 AVWAP: 최근 120봉 최저점부터 지금까지 거래량 가중 평균
+    { let pv = 0, vv = 0; for (let i = li + wo; i < n; i++) { const tp = (cs[i].h + cs[i].l + cs[i].c) / 3; pv += tp * cs[i].v; vv += cs[i].v; } if (vv > 0 && n - (li + wo) >= 10) add('avwap', pv / vv); }
+    // 11) 거래량 터진 저점: 스윙 저점 중 거래량이 20봉 평균의 2배 이상
+    for (const s1 of lows) { const v20 = cs.slice(Math.max(0, s1.i - 20), s1.i).reduce((x, k) => x + k.v, 0) / Math.min(20, Math.max(1, s1.i)); if (v20 > 0 && cs[s1.i].v >= v20 * 2) add('vsl', s1.p, { vr: cs[s1.i].v / v20 }); }
+    // 12) RSI 상승 다이버전스: 최근 두 스윙 저점(좌우 3봉)에서 가격은 더 낮고 RSI는 더 높음
+    { const sl3 = swingLows(cs.slice(-120), 3).map((q) => ({ ...q, i: q.i + n - Math.min(n, 120) })).filter((q) => rsi[q.i] != null); if (sl3.length >= 2) { const a2 = sl3[sl3.length - 2], b2 = sl3[sl3.length - 1]; if (b2.p < a2.p && rsi[b2.i] > rsi[a2.i] + 2 && rsi[b2.i] < 45) add('div', b2.p, { r1: rsi[a2.i], r2: rsi[b2.i] }); } }
+
     // 현재가 아래(+1% 위까지) 근거만 → ATR 0.6배 안의 근거끼리 묶어 구간을 만든다
     const below = cand.filter((x) => x.p <= price * 1.01).sort((a, b) => b.p - a.p);
     const zones = [];
@@ -189,14 +199,19 @@ const ZoneMath = (() => {
     }
     const out = zones.map((z) => {
       // 같은 성격의 근거는 한 가지로 셈(피보나치 3개·이동평균 3개·매물대(POC·VAL·마디)가 한 구간에 겹쳐도 각각 1)
-      const kinds = new Set(z.items.map((x) => (x.key.startsWith('fib') ? 'fib' : x.key.startsWith('ma') ? 'ma' : x.key === 'poc' || x.key === 'val' || x.key === 'hvn' ? 'vol' : x.key)));
+      const kinds = new Set(z.items.map((x) => (x.key.startsWith('fib') ? 'fib' : x.key.startsWith('ma') ? 'ma' : x.key === 'poc' || x.key === 'val' || x.key === 'hvn' ? 'vol' : x.key === 'vsl' ? 'swing' : x.key)));
+      // 거래량 터진 저점은 지지선과 같은 저점이라 근거 수는 지지선과 한 가지로 세고, 무게만 조금 더함
       const touchBonus = Math.min(1, z.items.filter((x) => x.key === 'swing' || x.key === 'flip').reduce((s, x) => s + Math.max(0, x.touches - 1), 0) * 0.5);
       const low = z.min - A * 0.25, high = Math.min(z.max + A * 0.25, price * 1.01);
       const rx = reaction(cs, low, high, A);
       // 과거 반응: 2번 이상 닿았을 때 반등이 많으면 +0.5, 뚫림이 많으면 −0.5
       const rxBonus = rx.touches >= 2 ? (rx.bounces / rx.touches >= 0.6 ? 0.5 : rx.breaks / rx.touches >= 0.6 ? -0.5 : 0) : 0;
-      const score = kinds.size + touchBonus + rxBonus;
-      return { low, high, mid: (low + high) / 2, score: Math.round(score * 10) / 10, kinds: kinds.size, items: z.items.sort((a, b) => b.p - a.p), distPct: ((z.max - price) / price) * 100, react: rx };
+      // 반등 확률(과거 기준, 라플라스 보정: 닿은 횟수가 적으면 50% 쪽으로 당김)
+      const prob = Math.round(((rx.bounces + 1) / (rx.touches + 2)) * 100);
+      const hasWk = z.items.some((x) => x.key === 'wk'), hasDiv = z.items.some((x) => x.key === 'div'), hasVsl = z.items.some((x) => x.key === 'vsl');
+      const score = kinds.size + touchBonus + rxBonus + (hasWk ? 0.3 : 0) + (hasDiv ? 0.3 : 0) + (hasVsl ? 0.3 : 0);
+      const grade = score >= 4.5 && prob >= 55 ? '강' : score >= 3 ? '중' : '약';
+      return { low, high, mid: (low + high) / 2, score: Math.round(score * 10) / 10, kinds: kinds.size, prob, grade, items: z.items.sort((a, b) => b.p - a.p), distPct: ((z.max - price) / price) * 100, react: rx };
     }).filter((z) => z.kinds >= 2).sort((a, b) => b.score - a.score || b.high - a.high).slice(0, 4).sort((a, b) => b.high - a.high);
 
     const H52 = Math.max(...cs.slice(-365).map((k) => k.h)), L52 = Math.min(...cs.slice(-365).map((k) => k.l));
@@ -209,6 +224,6 @@ const ZoneMath = (() => {
     };
   }
   // 과거 반응 한 줄(앱·알림 공통)
-  const reactText = (rx) => (!rx || !rx.touches ? '과거에 위에서 내려와 닿은 적 없음' : `과거 ${rx.touches}번 닿아 반등 ${rx.bounces}번 · 뚫림 ${rx.breaks}번`);
+  const reactText = (rx) => (!rx || !rx.touches ? '과거에 위에서 내려와 닿은 적 없음' : `과거 ${rx.touches}번 닿아 반등 ${rx.bounces}번 · 뚫림 ${rx.breaks}번 (반등 ${Math.round(((rx.bounces + 1) / (rx.touches + 2)) * 100)}%)`);
   return { analyze, rsiSeries, atr, swingLows, swingHighs, volumeProfile, weekly, reaction, reactText, LABEL, WHY };
 })();

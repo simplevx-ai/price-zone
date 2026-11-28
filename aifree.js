@@ -1,5 +1,5 @@
 /* AI 마켓 스캐너 — 🤖 AI 분석을 키 없이 쓰는 두 가지 방법 (공부용, 자동 주문 없음)
- * 1) 📐 규칙 분석: 분석가 5명(추세·모멘텀·거래량·구간·위험)이 정해진 규칙으로 점수(−2~+2)를 매기고 합계로 5단계 등급을 낸다.
+ * 1) 📐 규칙 분석: 분석가 8명(추세·모멘텀·거래량·구간·위험·상위 봉·변동성 국면·저항과 손익비)이 정해진 규칙으로 점수(−2~+2)를 매기고 합계로 5단계 등급을 낸다.
  *    AI가 아니라 계산이므로 바로·무료로 나오고, 같은 데이터면 같은 결과다.
  * 2) 📋 분석 요청문 복사: 시세·지표·검토 구간·규칙 분석 결과를 담은 요청문을 만들어 복사 → Claude 앱·ChatGPT에 붙여 넣으면
  *    지금 쓰는 구독으로 전문가 팀식 분석을 받을 수 있다(API 키 필요 없음).
@@ -7,9 +7,10 @@
  */
 'use strict';
 
-const RULE_CUT = [[5, 'Buy'], [2, 'Overweight'], [-1, 'Hold'], [-4, 'Underweight'], [-Infinity, 'Sell']]; // 합계(−10~+10) → 등급
+const RULE_CUT = [[7, 'Buy'], [3, 'Overweight'], [-2, 'Hold'], [-6, 'Underweight'], [-Infinity, 'Sell']]; // 합계(−16~+16, 분석가 8명) → 등급
+const RULE_N = 8;
 
-// 일봉으로 분석가 5명의 점수와 근거를 계산
+// 일봉으로 분석가 8명의 점수와 근거를 계산
 function ruleAnalyze(cs, cat) {
   const n = cs.length;
   if (n < 60) return { error: '일봉이 60개보다 적어 규칙 분석을 할 수 없습니다' };
@@ -27,6 +28,9 @@ function ruleAnalyze(cs, cat) {
     if (s50 != null) { if (p > s50) { s += 0.5; why.push(`종가가 50일 평균(${f(s50)}) 위`); } else { s -= 0.5; why.push(`종가가 50일 평균(${f(s50)}) 아래`); } }
     if (s50 != null && s50p != null) { if (s50 > s50p) { s += 0.5; why.push('50일 평균이 10일 전보다 올라감(중기 추세 상승)'); } else { s -= 0.5; why.push('50일 평균이 10일 전보다 내려감(중기 추세 하락)'); } }
     if (e10 != null && s50 != null && (e10 > s50) !== (p > s50)) why.push('10일 EMA와 종가가 50일 평균을 두고 엇갈림(전환 구간일 수 있음)');
+    { const sh = ZoneMath.swingHighs(cs.slice(-120), 3), sl = ZoneMath.swingLows(cs.slice(-120), 3);
+      if (sh.length >= 2 && sl.length >= 2) { const hh = sh[sh.length - 1].p > sh[sh.length - 2].p, hl = sl[sl.length - 1].p > sl[sl.length - 2].p;
+        if (hh && hl) { s += 0.5; why.push('고점·저점이 모두 높아짐(상승 구조)'); } else if (!hh && !hl) { s -= 0.5; why.push('고점·저점이 모두 낮아짐(하락 구조)'); } else why.push('고점·저점 방향이 엇갈림(박스권·전환 중)'); } }
     A.push({ id: 'trend', name: '추세 분석가', icon: '📈', s: clamp(s), why }); }
 
   // 2) 모멘텀: RSI 위치·방향, MACD 히스토그램
@@ -46,6 +50,8 @@ function ruleAnalyze(cs, cat) {
       else if (h2 != null && h < h1 && h1 < h2) { s -= 0.5; why.push('MACD 히스토그램 2일 연속 나빠짐'); }
       else why.push(`MACD 히스토그램 ${h > 0 ? '양수(상승 쪽)' : '음수(하락 쪽)'}, 뚜렷한 변화 없음`);
     }
+    { const roc = n > 20 ? ((p - cs[i - 20].c) / cs[i - 20].c) * 100 : null; if (roc != null) { why.push(`20일 변화율 ${roc >= 0 ? '+' : ''}${roc.toFixed(1)}%`); if (roc >= 10) s += 0.5; else if (roc <= -10) s -= 0.5; } }
+    { const dv = !zr.error && zr.candidates.find((x) => x.key === 'div'); if (dv) { s += 0.5; why.push(`RSI 상승 다이버전스(가격은 더 낮은 저점 ${f(dv.p)}, RSI는 ${dv.r1.toFixed(0)}→${dv.r2.toFixed(0)}로 높아짐) — 파는 힘 약해짐`); } }
     A.push({ id: 'mom', name: '모멘텀 분석가', icon: '⚡', s: clamp(s), why }); }
 
   // 3) 거래량: 최근 10일 오른 날 거래량 vs 내린 날 거래량, 마지막 날 거래량 배율
@@ -54,6 +60,8 @@ function ruleAnalyze(cs, cat) {
     const v20 = cs.slice(-21, -1).reduce((a, k) => a + k.v, 0) / 20, vr = v20 ? last.v / v20 : null;
     if (up + dn > 0) { const ratio = dn ? up / dn : 9; why.push(`최근 10일 오른 날 거래량 ÷ 내린 날 거래량 = ${ratio >= 9 ? '9 이상' : ratio.toFixed(2)}`); if (ratio >= 1.5) s += 1; else if (ratio >= 1.1) s += 0.5; else if (ratio <= 0.67) s -= 1; else if (ratio <= 0.9) s -= 0.5; }
     if (vr != null) { const upDay = last.c >= cs[i - 1].c; if (vr >= 1.5) { s += upDay ? 1 : -1; why.push(`마지막 날 거래량이 20일 평균의 ${vr.toFixed(1)}배, ${upDay ? '오른 날(사는 쪽 힘)' : '내린 날(파는 쪽 힘)'}`); } else why.push(`마지막 날 거래량은 20일 평균의 ${vr.toFixed(1)}배(평소 수준)`); }
+    { let obv = 0; const ob = []; for (let k = 1; k < n; k++) { obv += cs[k].c > cs[k - 1].c ? cs[k].v : cs[k].c < cs[k - 1].c ? -cs[k].v : 0; ob.push(obv); }
+      if (ob.length > 21) { const d20 = ob[ob.length - 1] - ob[ob.length - 21], px20 = p - cs[i - 20].c; if (d20 > 0 && px20 < 0) { s += 0.5; why.push('OBV(누적 거래량)는 20일간 늘었는데 가격은 내림 → 조용히 사 모으는 신호일 수 있음'); } else if (d20 < 0 && px20 > 0) { s -= 0.5; why.push('가격은 올랐는데 OBV는 줄어듦 → 오름에 거래가 따라오지 않음'); } else why.push(`OBV 20일 방향 ${d20 >= 0 ? '증가' : '감소'}(가격과 같은 방향)`); } }
     if (!last.v) why.push('거래량 자료가 0이라 판단이 약함');
     A.push({ id: 'vol', name: '거래량 분석가', icon: '📊', s: clamp(s), why }); }
 
@@ -65,6 +73,7 @@ function ruleAnalyze(cs, cat) {
       const z = inside || near;
       if (z) {
         const rx = z.react, good = rx && rx.touches >= 2 && rx.bounces / rx.touches >= 0.6, bad = rx && rx.touches >= 2 && rx.breaks / rx.touches >= 0.6;
+        why.push(`검토 구간 신뢰도 ${z.grade} · 과거 반등 확률 ${z.prob}% · 점수 ${z.score}`); if (z.grade === '강') s += 0.5; else if (z.grade === '약') s -= 0.25;
         if (inside) { s += 1; why.push(`지금 검토 구간 ${f(z.low)}~${f(z.high)} 안(근거 ${z.kinds}가지)`); }
         else { const dist = ((p - z.high) / p) * 100; if (dist <= 5) { s += 0.5; why.push(`가까운 검토 구간 ${f(z.low)}~${f(z.high)}까지 ${dist.toFixed(1)}% 위`); } else why.push(`가까운 검토 구간까지 ${dist.toFixed(1)}% — 지지까지 거리가 있음`); }
         if (good) { s += 0.5; why.push(ZoneMath.reactText(rx) + ' → 반등이 잦았던 자리'); }
@@ -85,6 +94,36 @@ function ruleAnalyze(cs, cat) {
     if (stop) why.push(`틀렸다고 볼 가격(참고): ${f(stop)} (${z ? '가까운 검토 구간 아래 0.5 ATR' : '현재가 −2 ATR'}, 현재가 대비 ${(((stop - p) / p) * 100).toFixed(1)}%)`);
     A.push({ id: 'risk', name: '위험 분석가', icon: '🛡️', s: clamp(s), why, stop }); }
 
+  // 6) 상위 봉(주봉): 주봉 종가와 10·20주 평균, 주봉 RSI — 큰 흐름이 같은 방향인지
+  { let s = 0; const why = [];
+    const wk = ZoneMath.weekly(cs), wc = wk.map((k) => k.c), m = wc.length;
+    const avg = (k) => (m >= k ? wc.slice(-k).reduce((a, x) => a + x, 0) / k : null), w10 = avg(10), w20 = avg(20), wr = ZoneMath.rsiSeries(wc)[m - 1];
+    if (w20 != null) { if (wc[m - 1] > w20) { s += 1; why.push(`주봉 종가가 20주 평균(${f(w20)}) 위 → 큰 흐름 상승`); } else { s -= 1; why.push(`주봉 종가가 20주 평균(${f(w20)}) 아래 → 큰 흐름 하락`); } } else why.push('주봉이 20개보다 적어 큰 흐름 판단이 약함');
+    if (w10 != null && w20 != null) { if (w10 > w20) { s += 0.5; why.push('10주 평균이 20주 평균 위(주봉 정배열)'); } else { s -= 0.5; why.push('10주 평균이 20주 평균 아래(주봉 역배열)'); } }
+    if (wr != null) { why.push(`주봉 RSI ${wr.toFixed(0)}`); if (wr > 75) { s -= 0.5; why.push('주봉 과열 — 큰 단위에서 쉬어 갈 수 있음'); } else if (wr < 30) { s += 0.5; why.push('주봉 과매도 — 큰 단위 반등 여지'); } }
+    A.push({ id: 'htf', name: '상위 봉 분석가', icon: '🗓️', s: clamp(s), why }); }
+
+  // 7) 변동성 국면: 볼린저 폭(좁아짐=큰 움직임 준비), ATR 변화 — 방향보다 '지금 들어가기 좋은 국면인지'
+  { let s = 0; const why = [];
+    const bw = []; for (let k = Math.max(20, n - 120); k < n; k++) { const u = I.boll_ub[k], l = I.boll_lb[k], mm = I.boll[k]; if (u != null && l != null && mm) bw.push((u - l) / mm); }
+    if (bw.length >= 40) { const cur = bw[bw.length - 1], rank = bw.filter((x) => x <= cur).length / bw.length;
+      why.push(`볼린저 폭이 최근 120일 중 하위 ${(rank * 100).toFixed(0)}% 위치`);
+      if (rank <= 0.2) { why.push('폭이 매우 좁음(스퀴즈) — 곧 크게 움직일 수 있음, 방향 확인 뒤가 안전'); if (p > I.boll[i]) s += 0.5; else s -= 0.5; }
+      else if (rank >= 0.9) { s -= 0.5; why.push('폭이 매우 넓음 — 이미 크게 움직인 뒤라 되돌림 위험'); } }
+    { const a0 = at(I.atr), a20 = at(I.atr, i - 20); if (a0 && a20) { const ch = (a0 / a20 - 1) * 100; why.push(`ATR 20일 전 대비 ${ch >= 0 ? '+' : ''}${ch.toFixed(0)}%`); if (ch >= 50 && p < cs[i - 20].c) { s -= 1; why.push('하락하면서 변동성이 커짐 — 투매·급락 국면 주의'); } else if (ch <= -30 && p > cs[i - 20].c) { s += 0.5; why.push('오르면서 변동성이 줄어듦 — 안정적인 상승'); } } }
+    A.push({ id: 'regime', name: '변동성 국면 분석가', icon: '🌊', s: clamp(s), why }); }
+
+  // 8) 저항·손익비: 위쪽 저항(스윙 고점·매물대 상단)까지 거리와 위험 분석가 손절가로 손익비
+  { let s = 0; const why = [];
+    const ups = ZoneMath.swingHighs(cs.slice(-200), 5).map((x) => x.p).concat(!zr.error && zr.vp ? [zr.vp.vah, zr.vp.poc] : []).filter((x) => x > p * 1.005).sort((a, b) => a - b);
+    const stop = A.find((x) => x.id === 'risk').stop, res1 = ups[0];
+    if (res1) {
+      const up = ((res1 - p) / p) * 100; why.push(`가까운 저항 ${f(res1)} (현재가 대비 +${up.toFixed(1)}%)`);
+      if (stop && stop < p) { const rr = (res1 - p) / (p - stop); why.push(`손절 참고가 ${f(stop)}까지 대비 손익비 1 : ${rr.toFixed(2)}`); if (rr >= 2) { s += 1; why.push('손익비가 좋음(2배 이상)'); } else if (rr >= 1.2) s += 0.25; else if (rr < 0.8) { s -= 1; why.push('저항이 손절보다 가까움 — 먹을 폭보다 잃을 폭이 큼'); } }
+      const res2 = ups.find((x) => x > res1 * 1.02); if (res2) why.push(`다음 저항 ${f(res2)} (+${(((res2 - p) / p) * 100).toFixed(1)}%)`);
+    } else { s += 0.5; why.push('최근 200봉 안에 위쪽 저항이 없음(신고가 부근 — 막힐 자리가 적음)'); }
+    A.push({ id: 'rr', name: '저항·손익비 분석가', icon: '🎯', s: clamp(s), why }); }
+
   const total = Math.round(A.reduce((a, x) => a + x.s, 0) * 10) / 10;
   const rating = RULE_CUT.find(([c]) => total >= c)[1];
   const pros = A.filter((x) => x.s > 0).sort((a, b) => b.s - a.s), cons = A.filter((x) => x.s < 0).sort((a, b) => a.s - b.s);
@@ -95,8 +134,8 @@ function ruleAnalyze(cs, cat) {
 function ruleCard(R, cat) {
   if (R.error) return `<div class="errbox" style="margin-top:0">${esc(R.error)}</div>`;
   const bar = (s) => `<span class="rscore ${s > 0 ? 'up' : s < 0 ? 'down' : ''}">${s > 0 ? '+' : ''}${s}</span>`;
-  return `<div class="row spread"><b>합계 ${R.total > 0 ? '+' : ''}${R.total} / ±10</b>${ratingBadge(R.rating)}</div>
-    <div class="muted" style="font-size:12px;margin-top:2px">기준: +5 이상 매수 · +2 이상 비중 확대 · −1 이상 보유 · −4 이상 비중 축소 · −4 미만 매도 (규칙 계산, AI 아님)</div>
+  return `<div class="row spread"><b>합계 ${R.total > 0 ? '+' : ''}${R.total} / ±${RULE_N * 2}</b>${ratingBadge(R.rating)}</div>
+    <div class="muted" style="font-size:12px;margin-top:2px">기준: +7 이상 매수 · +3 이상 비중 확대 · −2 이상 보유 · −6 이상 비중 축소 · −6 미만 매도 (분석가 8명 규칙 계산, AI 아님)</div>
     ${R.analysts.map((a) => `<details class="scrow" style="margin-top:8px"><summary><div class="row spread"><b>${a.icon} ${a.name}</b>${bar(a.s)}</div></summary><ul class="steps" style="font-size:13px;margin-top:4px">${a.why.map((t) => `<li>${esc(t)}</li>`).join('')}</ul></details>`).join('')}
     <div class="grid2" style="font-size:13px;margin-top:10px"><div><b class="up">👍 좋게 보는 근거</b><ul class="steps">${R.pros.map((a) => `<li>${a.name} ${bar(a.s)}</li>`).join('') || '<li class="muted">없음</li>'}</ul></div><div><b class="down">👎 조심할 근거</b><ul class="steps">${R.cons.map((a) => `<li>${a.name} ${bar(a.s)}</li>`).join('') || '<li class="muted">없음</li>'}</ul></div></div>`;
 }
@@ -106,7 +145,7 @@ function rulePrompt(w, cs, R) {
   const cat = w.cat, n = cs.length, d = (t) => aiDate(t, cat), I = AIInd.all(cs), f = (x) => (x == null || !Number.isFinite(x) ? '없음' : fmtP(x, cat));
   const rows = cs.slice(-20).map((k, j) => { const i = n - 20 + j; return `| ${d(k.t)} | ${f(k.o)} | ${f(k.h)} | ${f(k.l)} | ${f(k.c)} | ${Math.round(k.v).toLocaleString('en-US')} | ${r2(I.rsi[i], 1)} | ${r2(I.macdh[i], 3)} |`; });
   const ch = (k) => (n > k ? (((cs[n - 1].c - cs[n - 1 - k].c) / cs[n - 1 - k].c) * 100).toFixed(2) + '%' : '없음');
-  const zones = R.zones && R.zones.length ? R.zones.map((z, i) => `- 구간 ${i + 1}: ${f(z.low)} ~ ${f(z.high)} (근거 ${z.kinds}가지, 점수 ${z.score}): ${[...new Set(z.items.map((x) => x.label))].join(', ')} / ${ZoneMath.reactText(z.react)}`).join('\n') : '- 현재가 아래에 근거 2가지 이상 겹친 구간 없음';
+  const zones = R.zones && R.zones.length ? R.zones.map((z, i) => `- 구간 ${i + 1}: ${f(z.low)} ~ ${f(z.high)} (근거 ${z.kinds}가지, 점수 ${z.score}, 신뢰도 ${z.grade}): ${[...new Set(z.items.map((x) => x.label))].join(', ')} / ${ZoneMath.reactText(z.react)}`).join('\n') : '- 현재가 아래에 근거 2가지 이상 겹친 구간 없음';
   const rule = R.error ? R.error : R.analysts.map((a) => `- ${a.name} ${a.s > 0 ? '+' : ''}${a.s}: ${a.why.join(' / ')}`).join('\n') + `\n- 합계 ${R.total} → 규칙 등급 ${R.rating}`;
   return `당신은 주식·코인 리서치 팀입니다. 아래 데이터만 근거로 ${w.name} (${w.sym}, ${CATS[cat].label})를 분석해 주세요. 공부용이며 매수·매도 추천이 아닙니다.
 
@@ -152,7 +191,7 @@ async function copyText(t) {
 // 종목 화면에 붙는 '키 없이 분석' 두 카드
 async function renderFreeAi(host, w) {
   host.innerHTML = `<div class="card"><h2>📐 규칙 분석 <span class="muted">(키 없이 바로 · 무료)</span></h2>
-      <div class="muted" style="font-size:13px">분석가 5명(추세·모멘텀·거래량·구간·위험)이 정해진 규칙으로 점수를 매겨 5단계 등급을 냅니다. AI가 아닌 계산이라 같은 데이터면 같은 결과입니다.</div>
+      <div class="muted" style="font-size:13px">분석가 8명(추세·모멘텀·거래량·구간·위험·상위 봉·변동성 국면·저항과 손익비)이 정해진 규칙으로 점수를 매겨 5단계 등급을 냅니다. AI가 아닌 계산이라 같은 데이터면 같은 결과입니다.</div>
       <div id="ruleOut" style="margin-top:8px"><div class="muted">일봉 받는 중…</div></div></div>
     <div class="card"><h2>📋 AI에 붙여 넣을 분석 요청문</h2>
       <div class="muted" style="font-size:13px">시세·지표·검토 구간·규칙 분석을 담은 요청문을 복사합니다. <b>Claude 앱이나 ChatGPT에 붙여 넣으면</b> 지금 쓰는 구독으로 전문가 팀식 분석(분석가 → 강세·약세 토론 → 위험 관리 → 5단계 등급 → 공부 정리)을 받을 수 있습니다. API 키가 필요 없습니다.</div>

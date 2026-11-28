@@ -84,7 +84,7 @@ async function viewNq() {
     ${rs.checkedAt && (rs.version || 0) < 8 ? '<div class="warnlist">스크립트를 새 버전(v8)으로 바꿔야 알림이 동작합니다</div>' : ''}
     ${rs.nq && rs.nq.enabled ? `<div class="muted" style="font-size:12px;margin-top:4px">스크립트 상태: 켜짐${rs.nq.regime ? ' · 장세 ' + (NQ_STATE_KO[rs.nq.regime] || {}).t : ''}${rs.nq.at ? ' · 마지막 확인 ' + nqTime(rs.nq.at) : ''}</div>` : ''}</div>`;
 
-  view().innerHTML = `${nqSwitch('nq')}<div class="card warnlist" style="margin-top:0;font-size:13px">📘 정해진 규칙이 낸 신호입니다. 매수·매도 추천이 아니며 <b>자동 주문은 하지 않습니다</b>. TQQQ·SQQQ는 3배 레버리지 상품이고 선물은 손실이 원금보다 커질 수 있습니다.</div>
+  view().innerHTML = `${nqSwitch('nq')}<div class="card warnlist" style="margin-top:0;font-size:13px">📘 정해진 규칙이 낸 신호입니다. 매수·매도 추천이 아니며 <b>자동 주문은 하지 않습니다</b>. TQQQ·SQQQ는 3배 레버리지 상품이고 선물은 손실이 원금보다 커질 수 있습니다.</div>${nqCmeCard()}
     <div class="card"><div class="row spread"><h2 style="margin:0">지금 장세 <span class="muted">(QQQ 일봉)</span></h2>${st ? `<b style="color:${st.c};font-size:18px">${st.i} ${st.t}</b>` : '<span class="muted">계산 못 함</span>'}</div>
       ${R ? `<div class="muted" style="font-size:12px;margin:4px 0 6px">점수 ${R.score > 0 ? '+' : ''}${R.score} (−5~+5, +3 이상 상승장 → TQQQ 쪽만, −3 이하 하락장 → SQQQ 쪽만, 그 사이 관망) · ${new Date(R.t).toLocaleDateString('ko-KR')} 마감 기준</div>
       <ul class="checks">${R.checks.map((c) => `<li>${c.ok ? '✅' : '❌'} ${esc(c.name)} <span class="muted">(${n2(c.val, c.key === 'macd' ? 3 : 2)})</span></li>`).join('')}</ul>` : ''}
@@ -143,4 +143,31 @@ function drawNqEquity(cv, trades) {
   g.strokeStyle = css.getPropertyValue('--line') || '#E2E6EF'; g.beginPath(); g.moveTo(26, y(0)); g.lineTo(w, y(0)); g.stroke();
   g.strokeStyle = pts[pts.length - 1] >= 0 ? '#D64545' : '#1C60D6'; g.lineWidth = 2; g.beginPath(); pts.forEach((v, i) => (i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)))); g.stroke();
   g.fillStyle = css.getPropertyValue('--muted') || '#66708A'; g.font = '10px sans-serif'; g.fillText(hi.toFixed(1) + 'R', 0, 10); g.fillText(lo.toFixed(1) + 'R', 0, h - 2);
+}
+
+/* CME 나스닥100 선물(NQ·MNQ) 월물 — 날짜로 지금 거래하는 월물 코드를 계산(시세 아님, 정보용) */
+function nqCme(now = new Date()) {
+  const M = [[2, 'H', 3], [5, 'M', 6], [8, 'U', 9], [11, 'Z', 12]]; // [월 인덱스, 코드, 월]
+  const third = (y, m) => { const d = new Date(Date.UTC(y, m, 1)); const add = (5 - d.getUTCDay() + 7) % 7; return new Date(Date.UTC(y, m, 1 + add + 14, 13, 30)); }; // 셋째 금요일 09:30 ET ≈ 13:30 UTC
+  const list = [];
+  for (let y = now.getUTCFullYear(); y <= now.getUTCFullYear() + 1; y++) for (const [m, c, mm] of M) { const ex = third(y, m); list.push({ code: 'NQ' + c + String(y).slice(2), mcode: 'MNQ' + c + String(y).slice(2), y, mm, exp: ex, roll: new Date(ex.getTime() - 8 * 86400e3) }); }
+  const act = list.filter((x) => x.exp > now);
+  const front = act[0], next = act[1];
+  const rolled = now >= front.roll; // 롤오버 날이 지나면 거래가 다음 월물로 옮겨 감
+  return { front, next, main: rolled ? next : front, rolled, daysToExp: Math.ceil((front.exp - now) / 86400e3), daysToRoll: Math.ceil((front.roll - now) / 86400e3) };
+}
+function nqCmeCard() {
+  const k = nqCme(), d = (t) => `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+  return `<div class="card"><h2>🏦 CME 나스닥100 선물 월물 <span class="muted">(정보 — 시세 아님)</span></h2>
+    <div class="grid2" style="font-size:14px">
+      <div>지금 주로 거래하는 월물<br><b style="font-size:18px">${k.main.code}</b> <span class="muted">(${k.main.y}년 ${k.main.mm}월물)</span></div>
+      <div>만기(셋째 금요일)<br><b>${d(k.front.exp)}</b> <span class="muted">${k.front.code} · ${k.daysToExp}일 남음</span></div>
+      <div>롤오버(다음 월물로 옮겨 가는 날)<br><b>${d(k.front.roll)}</b> <span class="muted">${k.rolled ? '지났음 → ' + k.next.code + ' 거래' : k.daysToRoll + '일 남음'}</span></div>
+      <div>다음 월물<br><b>${k.next.code}</b> <span class="muted">만기 ${d(k.next.exp)}</span></div></div>
+    <ul class="steps" style="font-size:13px;margin-top:8px">
+      <li><b>NQ</b>(E-mini): 1포인트 = <b>$20</b> · 최소 움직임 0.25포인트 = $5</li>
+      <li><b>MNQ</b>(Micro, ${k.main.mcode}): 1포인트 = <b>$2</b> · 0.25포인트 = $0.50 (NQ의 1/10)</li>
+      <li>월물 코드: H=3월 · M=6월 · U=9월 · Z=12월 + 연도 두 자리 (예: NQZ25 = 2025년 12월물, <b>2025-12-19 만기로 끝남</b>)</li>
+      <li>거래 시간(한국): 월~금 오전 7시(겨울 8시) ~ 다음 날 오전 6시(겨울 7시), 매일 1시간 쉼</li>
+      <li>이 앱의 '나스닥 선물'은 OKX·바이낸스의 <b>QQQ 무기한</b>(24시간·펀딩비) 가격입니다. CME NQ와 값·시간이 다르며, CME 실시간 시세는 한국투자증권 키를 넣으면 볼 수 있게 할 예정입니다.</li></ul></div>`;
 }

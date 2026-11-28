@@ -343,7 +343,7 @@ async function viewAiHome() {
   const today = st.aiToday && st.aiToday.day ? `오늘 ${st.aiToday.calls}번 사용 / 한도 ${st.aiCap || 130}번 (설정에서 연결 확인 때 갱신)` : '';
   view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">${AI_DISC}</div>
     <div class="card"><h2>전문가 팀이 분석하는 방식</h2>
-      <ol class="steps" style="font-size:13px"><li><b>📐 규칙 분석</b> — 키 없이 바로·무료. 분석가 5명이 정해진 규칙으로 점수를 매겨 5단계 등급(모든 종목)</li>
+      <ol class="steps" style="font-size:13px"><li><b>📐 규칙 분석</b> — 키 없이 바로·무료. 분석가 8명이 정해진 규칙으로 점수를 매겨 5단계 등급(모든 종목)</li>
       <li><b>📋 요청문 복사</b> — 데이터가 담긴 분석 요청문을 복사해 Claude 앱·ChatGPT에 붙여 넣기(지금 쓰는 구독으로, 키 필요 없음)</li>
       <li><b>🤖 Claude 자동 분석</b> — Claude API 키가 스크립트에 있을 때만(해외주식). 아래 설명</li></ol>
       <div class="muted" style="font-size:13px">분석가 4명(차트·여론·뉴스·재무) → 강세·약세 토론 → 평가자 → 트레이더 → 위험 분석가 3명 → 포트폴리오 매니저가 <b>5단계 등급</b>을 냅니다. 마지막에 <b>공부 정리</b>(근거 비교·용어 풀이·판단이 바뀔 조건)를 붙입니다. 종목 1개에 Claude를 13번 부르고 3~6분, 약 1달러 안팎(추정)이 듭니다.</div>

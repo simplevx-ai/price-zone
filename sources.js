@@ -119,7 +119,41 @@ async function binance(path) {
 }
 
 /* ───────── 출처별 캔들 ───────── */
+/* 주식 분할 전 가격 맞춤(선물 스캐너 levels.js fixSplits와 같은 식) — 해외주식·주식 선물 봉에 씀 */
+const SPLIT_N = [2, 3, 4, 5, 8, 10, 15, 20, 25, 30, 40, 50, 100];
+// 알려진 분할(봉 하나 안에서 분할과 큰 등락이 겹치면 비율이 헷갈려서 정답을 적어 둠). at = 분할 적용 시각(UTC)
+const KNOWN_SPLITS = { SNDK: [{ at: Date.UTC(2026, 10, 19, 21, 1), n: 8 }] }; // 샌디스크 8:1, 2026-11-19 미국 장 마감 뒤
+function fixSplits(cs, sym) {
+  if (!cs || cs.length < 3) return cs;
+  const out = cs.map((k) => ({ t: k.t, o: k.o, h: k.h, l: k.l, c: k.c, v: k.v }));
+  let fixed = 0;
+  for (let i = out.length - 1; i >= 1; i--) {
+    const k = out[i];
+    let r = out[i - 1].c / k.o, within = false;
+    if (!(r > 1.85 || r < 0.54)) { r = k.o / k.c; within = true; if (!(r > 1.85 || r < 0.54)) continue; }
+    const big = r > 1 ? r : 1 / r, kn = (KNOWN_SPLITS[String(sym || '').toUpperCase()] || []).find((x) => Math.abs(k.t - x.at) <= 3 * 86400e3 && big >= x.n * 0.6 && big <= x.n * 1.6);
+    const n = kn ? kn.n : SPLIT_N.reduce((p, q) => (Math.abs(q - big) < Math.abs(p - big) ? q : p));
+    if (!kn && Math.abs(n - big) / n > (n <= 3 ? 0.06 : 0.25)) continue; // 분할 비율과 멀면 진짜 급등락으로 보고 그대로 둠(2·3배는 거의 딱 맞을 때만)
+    const f = r > 1 ? 1 / n : n;
+    for (let j = 0; j < i; j++) { const x = out[j]; x.o *= f; x.h *= f; x.l *= f; x.c *= f; x.v /= f; }
+    if (within) { // 분할이 그 봉 안에서 일어남: 분할 전 쪽 값(시가와, 분할 전에 찍힌 고가·저가)만 맞춤
+      k.o *= f; const hi = Math.max(k.o, k.c), lo = Math.min(k.o, k.c);
+      if (f < 1 && k.h > hi * 1.5) k.h *= f;
+      if (f > 1 && k.l < lo / 1.5) k.l *= f;
+      k.h = Math.max(k.h, hi); k.l = Math.min(k.l, lo);
+    }
+    fixed++;
+  }
+  out.splits = fixed;
+  return out;
+}
 async function fetchCandles(a, tf) {
+  const cs = await fetchCandles0(a, tf);
+  if (a.cat !== 'us' && a.cat !== 'cfut') return cs;
+  const fx = fixSplits(cs, String(a.sym).replace(/USDT$/, ''));
+  fx.src = cs.src; return fx;
+}
+async function fetchCandles0(a, tf) {
   if (a.cat === 'coin') {
     const unit = { day: 'days', h4: 'minutes/240', h1: 'minutes/60', m30: 'minutes/30', m15: 'minutes/15' }[tf];
     const pull = async (get, total) => {
