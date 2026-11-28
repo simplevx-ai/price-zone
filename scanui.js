@@ -1,4 +1,4 @@
-/* AI 마켓 스캐너 — 📊 ETF 선물 스캐너 화면 (OKX·바이낸스 공개 시세, 자동 주문 없음) */
+/* AI 마켓 스캐너 — 📊 스캐너 화면(ETF 선물) (OKX·바이낸스 공개 시세, 자동 주문 없음) */
 'use strict';
 
 const SC_TF = { '15m': { okx: '15m', bn: '15m', label: '15분봉', ttl: 2 * 60e3 }, '30m': { okx: '30m', bn: '30m', label: '30분봉', ttl: 3 * 60e3 }, '1H': { okx: '1H', bn: '1h', label: '1시간봉', ttl: 5 * 60e3 }, '4H': { okx: '4H', bn: '4h', label: '4시간봉', ttl: 10 * 60e3 }, '1D': { okx: '1Dutc', bn: '1d', label: '일봉', ttl: 30 * 60e3 } };
@@ -40,10 +40,10 @@ const scMoney = (v) => (v >= 1e8 ? (v / 1e8).toFixed(v >= 1e10 ? 0 : 1) + '억 �
 const scChip = (label, s) => `<span class="scchip s${Math.min(s, 4)}">${label} ${s}/5 ${SCAN.strength(s)}</span>`;
 
 async function viewScan() {
-  setTitle('📊 ETF 스캐너');
+  setTitle('📊 스캐너');
   const prefs = await KV.get('scPrefs', { set: 'core', tf: '4H', sort: 'up' });
   const draw = async () => {
-    view().innerHTML = `${nqSwitch('scan')}
+    view().innerHTML = `${nqSwitch('scan')}<div id="xbnq"></div>
       <div class="card warnlist" style="margin-top:0;font-size:13px">📘 정해진 조건의 개수로 매긴 점수입니다. 매수·매도 추천이 아니며 <b>자동 주문은 하지 않습니다</b>. 3배 레버리지 상품을 선물로 거래하면 손실이 원금보다 커질 수 있습니다.</div>
       <div class="chips">${Object.entries(SC_SET).map(([k, v]) => `<button class="chip${prefs.set === k ? ' on' : ''}" data-set="${k}" type="button">${v}</button>`).join('')}</div>
       <div class="seg" role="radiogroup" aria-label="봉 단위">${Object.entries(SC_TF).map(([k, v]) => `<label><input type="radio" name="sctf" value="${k}"${prefs.tf === k ? ' checked' : ''}><span>${v.label}</span></label>`).join('')}</div>
@@ -58,6 +58,7 @@ async function viewScan() {
         <b>변동성</b>: 일봉 ATR(14)÷가격. 10% 이상 초고변동, 5~10% 고변동, 2~5% 중간, 2% 미만 낮음. ATR이 20봉 전의 1.5배 이상이면 '변동성 확대' 경고.<br>
         <b>VWAP</b>: 그날(UTC 0시, 한국 9시)부터의 거래량 가중 평균 가격(일봉은 최근 20봉). 데이터는 OKX에 있으면 OKX(직접 거래하시는 곳), 없으면 바이낸스.</div></details></div>
       <div class="disc">시세: OKX·바이낸스 공개 API · 자동 주문 없음 · UPRO·SPXU·SPDN은 두 거래소에 없음 · 바이낸스 'SPX'는 S&P500이 아닌 밈 코인</div>`;
+    if (typeof BNQ !== 'undefined') BNQ.card($('#xbnq')).catch(() => {}); // 🧠 비트코인·나스닥 분석(평일 18시 갱신)
     view().querySelectorAll('[data-set]').forEach((b) => { b.onclick = async () => { prefs.set = b.dataset.set; await KV.set('scPrefs', prefs); draw(); }; });
     view().querySelectorAll('[name=sctf]').forEach((r) => { r.onchange = async () => { prefs.tf = r.value; await KV.set('scPrefs', prefs); draw(); }; });
     view().querySelectorAll('[data-sort]').forEach((b) => { b.onclick = async () => { prefs.sort = b.dataset.sort; await KV.set('scPrefs', prefs); view().querySelectorAll('[data-sort]').forEach((x) => x.classList.toggle('on', x === b)); render2(); }; });
@@ -133,5 +134,5 @@ async function scAlertCard() {
 }
 // 📡 화면 위쪽 전환 버튼(스캐너 ↔ QQQ 규칙 신호)
 function nqSwitch(on) {
-  return `<div class="chips" style="margin-bottom:8px"><a class="chip${on === 'scan' ? ' on' : ''}" href="#/scan">📊 ETF 스캐너</a><a class="chip${on === 'nq' ? ' on' : ''}" href="#/nq">🔔 QQQ 규칙 신호</a></div>`;
+  return `<div class="chips" style="margin-bottom:8px"><a class="chip${on === 'scan' ? ' on' : ''}" href="#/scan">📊 스캐너</a><a class="chip${on === 'nq' ? ' on' : ''}" href="#/nq">🔔 QQQ 규칙 신호</a></div>`;
 }
