@@ -69,37 +69,59 @@ async function mtfCard(host, tfs, getCs) {
     <div class="muted" style="font-size:11px">방향 점수: 종가>EMA20·EMA20>EMA50·MACD 히스토그램 양수·증가·RSI 55/45 — 공부용 참고</div></div>`;
 }
 
-/* ── 🔥 청산 지도(추정) — 바이낸스 1시간봉 + 미결제약정 증가분으로 레버리지별 청산 가격을 쌓아 추정. 실제 청산 주문 위치가 아님 ── */
+/* ── 🔥 청산 지도(추정) — 거래소 1시간봉 + 미결제약정 증가분으로 레버리지별(10·25·50·100배) 청산 가격을 쌓아 추정. 실제 청산 주문 위치가 아님.
+ * 바이낸스(브라우저에서 바로) → 안 되면 알림 스크립트 v19가 OKX로 계산(주식 선물도 됨) ── */
+async function liqMapData(base) {
+  const ck = 'lmap:' + base, hit = await KV.get(ck, null);
+  if (hit && Date.now() - hit.at < 15 * 60e3) return hit.data;
+  let d = null;
+  try {
+    const sym = base.toUpperCase() + 'USDT';
+    const [K, OI] = await Promise.all([xJson(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1h&limit=500`), xJson(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${sym}&period=1h&limit=500`)]);
+    if (!Array.isArray(K) || !Array.isArray(OI) || K.length < 50 || !OI.length) throw new Error('바이낸스 없음');
+    const cs = K.map((k) => ({ t: +k[0], h: +k[2], l: +k[3], c: +k[4] })), oi = {};
+    OI.forEach((x) => { oi[x.timestamp] = +x.sumOpenInterestValue; });
+    const p = cs[cs.length - 1].c, lo = p * 0.85, hi = p * 1.15, N = 60, step = (hi - lo) / N, longB = Array(N).fill(0), shortB = Array(N).fill(0);
+    const minA = Array(cs.length).fill(Infinity), maxA = Array(cs.length).fill(-Infinity);
+    for (let i = cs.length - 2; i >= 0; i--) { minA[i] = Math.min(minA[i + 1], cs[i + 1].l); maxA[i] = Math.max(maxA[i + 1], cs[i + 1].h); }
+    for (let i = 1; i < cs.length; i++) {
+      const x = oi[cs[i].t], y = oi[cs[i - 1].t]; if (!(x && y) || x <= y) continue;
+      const add = x - y, entry = (cs[i].h + cs[i].l + cs[i].c) / 3;
+      [[10, 0.3], [25, 0.3], [50, 0.25], [100, 0.15]].forEach(([L, w]) => {
+        const ll = entry * (1 - 1 / L + 0.005), sl = entry * (1 + 1 / L - 0.005), v = add * w * 0.5;
+        if (ll > lo && ll < p && !(minA[i] <= ll)) longB[Math.floor((ll - lo) / step)] += v;
+        if (sl < hi && sl > p && !(maxA[i] >= sl)) shortB[Math.floor((sl - lo) / step)] += v;
+      });
+    }
+    const bins = []; for (let j = 0; j < N; j++) if (longB[j] || shortB[j]) bins.push({ px: lo + step * (j + 0.5), long: longB[j], short: shortB[j] });
+    const top = (k) => bins.filter((x) => x[k] > 0).sort((x, y) => y[k] - x[k]).slice(0, 3).map((x) => ({ px: x.px, usd: x[k] }));
+    d = { ok: true, price: p, bins, longs: top('long'), shorts: top('short'), hours: cs.length, src: '바이낸스' };
+  } catch (e) {
+    if (!(await relayOn())) throw new Error('바이낸스 선물에 없는 종목입니다(알림 스크립트를 연결하면 OKX로 계산)');
+    d = await relay('liqmap', { base });
+    if (!d.ok) throw new Error(d.error || '계산 못 함');
+  }
+  KV.set(ck, { at: Date.now(), data: d }).catch(() => {});
+  return d;
+}
 async function liqMapCard(host, base) {
   if (!host) return;
   host.innerHTML = '<div class="card"><h2>🔥 청산 지도(추정)</h2><div class="muted">계산 중…</div></div>';
   try {
-    const sym = base.toUpperCase() + 'USDT';
-    const [K, OI] = await Promise.all([xJson(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1h&limit=500`), xJson(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${sym}&period=1h&limit=500`)]);
-    const cs = K.map((k) => ({ t: +k[0], h: +k[2], l: +k[3], c: +k[4] })), oi = {}; OI.forEach((x) => { oi[x.timestamp] = +x.sumOpenInterestValue; });
-    const p = cs[cs.length - 1].c, lo = p * 0.85, hi = p * 1.15, N = 60, step = (hi - lo) / N, longB = Array(N).fill(0), shortB = Array(N).fill(0);
-    const LEV = [[10, 0.3], [25, 0.3], [50, 0.25], [100, 0.15]];
-    for (let i = 1; i < cs.length; i++) {
-      const a = oi[cs[i].t], b = oi[cs[i - 1].t]; if (!(a && b) || a <= b) continue;
-      const add = a - b, entry = (cs[i].h + cs[i].l + cs[i].c) / 3;
-      let minL = Infinity, maxH = -Infinity; for (let j = i + 1; j < cs.length; j++) { minL = Math.min(minL, cs[j].l); maxH = Math.max(maxH, cs[j].h); }
-      LEV.forEach(([L, w]) => {
-        const ll = entry * (1 - 1 / L + 0.005), sl = entry * (1 + 1 / L - 0.005), v = add * w * 0.5;
-        if (ll > lo && ll < p && !(minL <= ll)) longB[Math.floor((ll - lo) / step)] += v;
-        if (sl < hi && sl > p && !(maxH >= sl)) shortB[Math.floor((sl - lo) / step)] += v;
-      });
-    }
-    const top = (B, side) => B.map((v, j) => ({ v, px: lo + step * (j + 0.5), side })).filter((x) => x.v > 0).sort((x, y) => y.v - x.v).slice(0, 3).sort((x, y) => (side === 'long' ? y.px - x.px : x.px - y.px));
-    const TL = top(longB, 'long'), TS = top(shortB, 'short'), mx = Math.max(...longB, ...shortB, 1);
+    const d = await liqMapData(base), p = d.price;
     if (!host.isConnected) return;
-    const bars = [];
-    for (let j = N - 1; j >= 0; j--) { const v = longB[j] + shortB[j]; if (!v) continue; const px = lo + step * (j + 0.5); bars.push(`<div style="display:flex;align-items:center;gap:6px;font-size:11px;height:12px"><span style="width:64px;text-align:right" class="muted">${xNum(px)}</span><span style="height:9px;width:${Math.max(2, (v / mx) * 100)}%;background:${shortB[j] ? '#D64545' : '#1F9D63'};border-radius:2px"></span></div>`); }
-    host.innerHTML = `<div class="card"><h2>🔥 청산 지도 <span class="muted">(추정 · 바이낸스 ${base})</span></h2>
-      <div class="grid2" style="font-size:13px"><div><b class="down">위쪽 숏 청산 몰린 곳</b>${TS.map((x) => `<div>${xNum(x.px)} <span class="muted">(+${(((x.px / p) - 1) * 100).toFixed(1)}%, 약 $${xUsd(x.v)})</span></div>`).join('') || '<div class="muted">없음</div>'}</div>
-        <div><b class="up">아래쪽 롱 청산 몰린 곳</b>${TL.map((x) => `<div>${xNum(x.px)} <span class="muted">(${(((x.px / p) - 1) * 100).toFixed(1)}%, 약 $${xUsd(x.v)})</span></div>`).join('') || '<div class="muted">없음</div>'}</div></div>
-      <details style="margin-top:6px"><summary class="muted" style="font-size:12px">가격대별 막대 보기(현재가 ${xNum(p)})</summary><div style="margin-top:4px">${bars.join('')}</div></details>
-      <div class="muted" style="font-size:11px;margin-top:4px">최근 500시간 동안 미결제약정이 늘어난 시간마다 10·25·50·100배로 들어왔다고 가정해 청산 가격을 쌓고, 그 뒤 가격이 이미 지나간 곳은 지웠습니다. 청산이 몰린 가격대는 가격을 끌어당기기도 하지만 <b>추정치</b>입니다.</div></div>`;
-  } catch (e) { if (host.isConnected) host.innerHTML = `<div class="card muted" style="font-size:12px">🔥 청산 지도: 바이낸스 선물에 ${esc(base)}가 없거나 받지 못했습니다(${esc(e.message)}).</div>`; }
+    const mx = Math.max(1, ...d.bins.map((x) => x.long + x.short));
+    const near = (x) => (Math.abs(x.px / p - 1) <= 0.02 ? ' <b style="color:#E8A317">가까움</b>' : '');
+    const sorted = d.bins.slice().sort((x, y) => y.px - x.px);
+    const bars = sorted.map((x) => `<div style="display:flex;align-items:center;gap:6px;font-size:11px;height:12px"><span style="width:70px;text-align:right" class="muted">${xNum(x.px)}</span><span style="height:9px;width:${Math.max(2, ((x.long + x.short) / mx) * 100)}%;background:${x.short ? '#D64545' : '#1F9D63'};border-radius:2px"></span></div>`);
+    const pIdx = sorted.findIndex((x) => x.px < p);
+    if (pIdx >= 0) bars.splice(pIdx, 0, `<div style="font-size:11px;color:#E8A317;margin:2px 0">──── 현재가 ${xNum(p)} ────</div>`);
+    const side = (L, up) => L.map((x) => `<div>${xNum(x.px)} <span class="muted">(${up ? '+' : ''}${(((x.px / p) - 1) * 100).toFixed(1)}%, 약 $${xUsd(x.usd)})</span>${near(x)}</div>`).join('') || '<div class="muted">없음</div>';
+    host.innerHTML = `<div class="card"><h2>🔥 청산 지도 <span class="muted">(추정 · ${esc(d.src)} ${esc(base)})</span></h2>
+      <div class="grid2" style="font-size:13px"><div><b class="down">⬆️ 위쪽 숏 청산 몰린 곳</b>${side(d.shorts, true)}</div><div><b class="up">⬇️ 아래쪽 롱 청산 몰린 곳</b>${side(d.longs, false)}</div></div>
+      <details style="margin-top:6px"><summary class="muted" style="font-size:12px">가격대별 막대 보기(빨강 = 숏 청산, 초록 = 롱 청산)</summary><div style="margin-top:4px">${bars.join('')}</div></details>
+      <div class="muted" style="font-size:11px;margin-top:4px">최근 ${d.hours}시간 동안 미결제약정이 늘어난 시간마다 10·25·50·100배로 들어왔다고 가정해 청산 가격을 쌓고, 그 뒤 가격이 이미 지나간 곳은 지웠습니다. 청산이 몰린 가격대는 가격을 끌어당기기도 하지만 <b>추정치</b>이며 실제 주문 위치가 아닙니다(공부용).</div></div>`;
+  } catch (e) { if (host.isConnected) host.innerHTML = `<div class="card muted" style="font-size:12px">🔥 청산 지도: ${esc(e.message)}</div>`; }
 }
 
 /* ── 🐋 고래 흐름 — 바이낸스 상위 트레이더 롱 비율 + 큰 체결(최근 1000건 중 큰 주문) + 테이커 매수·매도 ── */
@@ -160,14 +182,23 @@ async function econCard(host) {
     <div class="muted" style="font-size:11px;margin-top:4px">🔴 큰 영향 🟠 중간(미국) · 출처 Forex Factory 공개 일정 · 1시간마다 갱신</div></div>`;
 }
 
-/* ── 💥 대량 청산 알림 켜기(알림 스크립트 v18) ── */
+/* ── 💥 대량 청산 · 🔥 청산 밀집 접근 디스코드 알림 설정(알림 스크립트 v19) ── */
 async function liqAlertCard(host) {
   if (!host) return;
   if (!(await relayOn())) { host.innerHTML = ''; return; }
-  let st = { enabled: false, usd: 3e7 }; try { const d = await relay('ping'); if (d.liq) st = d.liq; } catch { /* 기본값 */ }
-  host.innerHTML = `<div class="card"><div class="row spread"><b>💥 대량 청산 디스코드 알림</b><label class="row" style="margin:0"><input type="checkbox" id="lqOn"${st.enabled ? ' checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
-    <div class="row" style="gap:6px;margin-top:6px;align-items:center"><span style="font-size:13px">기준(최근 10분 합계)</span><select id="lqUsd">${[1e7, 3e7, 5e7, 1e8].map((v) => `<option value="${v}"${v === st.usd ? ' selected' : ''}>$${v / 1e6}M</option>`).join('')}</select></div>
-    <div class="muted" style="font-size:11px;margin-top:4px">OKX 비트코인·이더리움 청산이 10분에 기준을 넘으면 알림(같은 코인 1시간에 한 번). 롱 청산이 몰리면 급락 끝자락, 숏 청산이 몰리면 급등 끝자락인 경우가 많습니다.</div></div>`;
-  const save = async () => { try { await relay('saveLiq', { enabled: host.querySelector('#lqOn').checked, usd: +host.querySelector('#lqUsd').value }); toast && toast('저장했습니다'); } catch (e) { alert('저장 실패: ' + e.message); } };
-  host.querySelector('#lqOn').onchange = save; host.querySelector('#lqUsd').onchange = save;
+  let st = { enabled: false, usd: 1e7, alt: 2e6, near: true, coins: ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] };
+  try { const d = await relay('ping'); if (d.liq) st = Object.assign(st, d.liq); } catch { /* 기본값 */ }
+  const opt = (L, cur) => L.map((v) => `<option value="${v}"${v === cur ? ' selected' : ''}>$${v >= 1e6 ? v / 1e6 + 'M' : v / 1e3 + 'K'}</option>`).join('');
+  host.innerHTML = `<div class="card"><div class="row spread"><b>💥 청산 디스코드 알림</b><label class="row" style="margin:0"><input type="checkbox" id="lqOn"${st.enabled ? ' checked' : ''} style="width:22px;min-height:22px"> 켜기</label></div>
+    <div class="grid2" style="margin-top:6px;font-size:13px"><div><label for="lqUsd">비트코인 기준(10분 합계)</label><select id="lqUsd">${opt([5e6, 1e7, 3e7, 5e7, 1e8], st.usd)}</select><div class="muted" style="font-size:11px">이더리움은 이 금액의 절반</div></div>
+      <div><label for="lqAlt">알트코인 기준</label><select id="lqAlt">${opt([5e5, 1e6, 2e6, 5e6, 1e7], st.alt)}</select></div></div>
+    <label for="lqCoins" style="margin-top:6px">볼 코인(쉼표로, 8개까지)</label><input id="lqCoins" value="${esc((st.coins || []).join(','))}" autocomplete="off">
+    <label class="row" style="gap:6px;margin-top:6px;font-size:13px"><input type="checkbox" id="lqNear"${st.near ? ' checked' : ''}> 🔥 가격이 청산 밀집 구간 1% 안으로 오면 알림(매시 확인, 같은 구간 6시간에 한 번)</label>
+    <button class="btn small" id="lqSave" type="button" style="margin-top:6px">저장</button>
+    <div class="muted" style="font-size:11px;margin-top:4px">OKX 실제 청산 기록으로 10분마다 확인 · 같은 코인 1시간에 한 번 · <b>디스코드로만</b> 보냄 · 롱 청산이 몰리면 급락의 끝자락, 숏 청산이 몰리면 급등의 끝자락인 경우가 많지만 단정할 수 없음(공부용)</div></div>`;
+  const save = async () => {
+    try { await relay('saveLiq', { enabled: host.querySelector('#lqOn').checked, usd: +host.querySelector('#lqUsd').value, alt: +host.querySelector('#lqAlt').value, near: host.querySelector('#lqNear').checked, coins: host.querySelector('#lqCoins').value }); if (typeof toast === 'function') toast('청산 알림 설정을 저장했습니다'); }
+    catch (e) { alert('저장 실패: ' + e.message); }
+  };
+  host.querySelector('#lqOn').onchange = save; host.querySelector('#lqSave').onclick = save;
 }

@@ -27,7 +27,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 18;
+const VERSION = 19;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -56,7 +56,8 @@ function doPost(e) {
     if (d.action === 'econ') return json_(econRelay_());
     if (d.action === 'etf') return json_(etfRelay_());
     if (d.action === 'earn') return json_(earnRelay_(d));
-    if (d.action === 'saveLiq') { P.setProperty('LIQ_CFG', JSON.stringify({ enabled: !!d.enabled, usd: Math.max(5e6, Number(d.usd) || 3e7), at: new Date().toISOString() })); return json_({ ok: true, liq: liqStatus_() }); }
+    if (d.action === 'saveLiq') { const coins = String(d.coins || 'BTC,ETH,SOL,XRP,DOGE').toUpperCase().split(',').map((x) => x.replace(/[^A-Z0-9]/g, '')).filter(Boolean).slice(0, 8); P.setProperty('LIQ_CFG', JSON.stringify({ enabled: !!d.enabled, usd: Math.max(5e6, Number(d.usd) || 1e7), alt: Math.max(5e5, Number(d.alt) || 2e6), near: d.near !== false, coins: coins, at: new Date().toISOString() })); return json_({ ok: true, liq: liqStatus_() }); }
+    if (d.action === 'liqmap') return json_(liqMapRelay_(d));
     if (d.action === 'claude') return json_(claudeRelay_(d));
     if (d.action === 'saveScan') { P.setProperty('SCAN_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
     if (d.action === 'saveCoinStrong') { P.setProperty('COIN_STRONG_CFG', JSON.stringify({ enabled: !!d.enabled, at: new Date().toISOString() })); return json_({ ok: true, enabled: !!d.enabled }); }
@@ -318,18 +319,75 @@ function paCheck_() {
 }
 
 /* ───────── 💥 대량 청산 알림(v18): OKX BTC·ETH 최근 10분 청산 합계가 기준(기본 3천만 달러) 넘으면 ───────── */
-function liqStatus_() { const c = JSON.parse(PropertiesService.getScriptProperties().getProperty('LIQ_CFG') || '{}'); return { enabled: !!c.enabled, usd: c.usd || 3e7 }; }
+function liqStatus_() { const c = JSON.parse(PropertiesService.getScriptProperties().getProperty('LIQ_CFG') || '{}'); return { enabled: !!c.enabled, usd: c.usd || 1e7, alt: c.alt || 2e6, near: c.near !== false, coins: c.coins || ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'] }; }
+// OKX 계약 크기(코인 몇 개 = 1계약), 6시간 캐시
+function okxCtVal_(base) {
+  const cache = CacheService.getScriptCache(), hit = cache.get('ctv_' + base); if (hit) return Number(hit);
+  const r = okx_('/public/instruments?instType=SWAP&instId=' + base + '-USDT-SWAP')[0]; const v = r ? Number(r.ctVal) : 0;
+  if (v) cache.put('ctv_' + base, String(v), 21600); return v;
+}
+/* 🔥 청산 지도(추정, 서버 계산): OKX 1시간봉 300개 + 미결제약정 기록(달러) — 늘어난 시간마다 10·25·50·100배로 들어왔다고 보고 청산 가격을 쌓은 뒤, 그 뒤 가격이 지나간 곳은 지움. 30분 캐시 */
+function liqMap_(base) {
+  base = String(base || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); if (!base) throw new Error('종목 없음');
+  const cache = CacheService.getScriptCache(), hit = cache.get('lmap_' + base); if (hit) return JSON.parse(hit);
+  const id = base + '-USDT-SWAP';
+  const cs = SCAN.fromOkx(okx_('/market/candles?instId=' + id + '&bar=1H&limit=300')).map((k) => ({ t: k.t, h: k.h, l: k.l, c: k.c }));
+  let oiRows = okx_('/rubik/stat/contracts/open-interest-history?instId=' + id + '&period=1H&limit=100');
+  for (let p = 0; p < 2 && oiRows.length; p++) { const more = okx_('/rubik/stat/contracts/open-interest-history?instId=' + id + '&period=1H&limit=100&end=' + oiRows[oiRows.length - 1][0]); if (!more.length) break; oiRows = oiRows.concat(more.filter((x) => +x[0] < +oiRows[oiRows.length - 1][0])); }
+  const oi = {}; oiRows.forEach((x) => { oi[+x[0]] = +x[3]; });
+  if (cs.length < 50) throw new Error('봉 부족');
+  const p = cs[cs.length - 1].c, lo = p * 0.85, hi = p * 1.15, N = 60, step = (hi - lo) / N, longB = Array(N).fill(0), shortB = Array(N).fill(0);
+  const LEV = [[10, 0.3], [25, 0.3], [50, 0.25], [100, 0.15]];
+  // 뒤에서부터 최저·최고를 미리 계산(그 뒤 가격이 지나갔는지)
+  const minAfter = Array(cs.length).fill(Infinity), maxAfter = Array(cs.length).fill(-Infinity);
+  for (let i = cs.length - 2; i >= 0; i--) { minAfter[i] = Math.min(minAfter[i + 1], cs[i + 1].l); maxAfter[i] = Math.max(maxAfter[i + 1], cs[i + 1].h); }
+  for (let i = 1; i < cs.length; i++) {
+    const a = oi[cs[i].t], b = oi[cs[i - 1].t]; if (!(a && b) || a <= b) continue;
+    const add = a - b, entry = (cs[i].h + cs[i].l + cs[i].c) / 3;
+    LEV.forEach((lw) => { const L = lw[0], w = lw[1], ll = entry * (1 - 1 / L + 0.005), sl = entry * (1 + 1 / L - 0.005), v = add * w * 0.5;
+      if (ll > lo && ll < p && !(minAfter[i] <= ll)) longB[Math.floor((ll - lo) / step)] += v;
+      if (sl < hi && sl > p && !(maxAfter[i] >= sl)) shortB[Math.floor((sl - lo) / step)] += v; });
+  }
+  const bins = []; for (let j = 0; j < N; j++) if (longB[j] || shortB[j]) bins.push({ px: lo + step * (j + 0.5), long: Math.round(longB[j]), short: Math.round(shortB[j]) });
+  const top = (side) => bins.filter((x) => x[side] > 0).sort((x, y) => y[side] - x[side]).slice(0, 3).map((x) => ({ px: x.px, usd: x[side] }));
+  const out = { ok: true, base: base, price: p, at: new Date().toISOString(), bins: bins, longs: top('long'), shorts: top('short'), hours: cs.length, src: 'OKX' };
+  cache.put('lmap_' + base, JSON.stringify(out), 1800);
+  return out;
+}
+function liqMapRelay_(d) { try { return liqMap_(d.base); } catch (e) { return { ok: false, error: '청산 지도: ' + e.message }; } }
+// 💥 대량 청산 + 🔥 청산 밀집 구간 접근 알림(디스코드만). 코인별 기준: BTC = usd, ETH = usd의 절반, 나머지 = alt
 function liqCheck_() {
   const P = PropertiesService.getScriptProperties(), cfg = liqStatus_(); if (!cfg.enabled) return;
-  const since = Date.now() - 10 * 60e3, st = JSON.parse(P.getProperty('LIQ_STATE') || '{}'), out = [];
-  [['BTC', 0.01], ['ETH', 0.1]].forEach(([c, ct]) => {
+  const since = Date.now() - 10 * 60e3, st = JSON.parse(P.getProperty('LIQ_STATE') || '{}'), out = [], near = [];
+  const lim = (c) => (c === 'BTC' ? cfg.usd : c === 'ETH' ? cfg.usd / 2 : cfg.alt);
+  cfg.coins.forEach((c) => {
     try {
+      const ct = okxCtVal_(c); if (!ct) return;
       const d = okx_('/public/liquidation-orders?instType=SWAP&uly=' + c + '-USDT&state=filled&limit=100'); let longs = 0, shorts = 0;
       (d[0] && d[0].details || []).forEach((x) => { if (+x.ts < since) return; const usd = +x.sz * ct * +x.bkPx; if (x.posSide === 'long') longs += usd; else shorts += usd; });
-      if (longs + shorts >= cfg.usd && (!st[c] || Date.now() - st[c] > 60 * 60e3)) { out.push('**' + c + '** ' + (longs >= shorts ? '롱 청산 ' : '숏 청산 ') + '$' + Math.round((longs + shorts) / 1e6) + 'M (롱 $' + Math.round(longs / 1e6) + 'M · 숏 $' + Math.round(shorts / 1e6) + 'M)'); st[c] = Date.now(); }
+      if (longs + shorts >= lim(c) && (!st[c] || Date.now() - st[c] > 60 * 60e3)) { out.push('**' + c + '** ' + (longs >= shorts ? '롱 청산 ' : '숏 청산 ') + '$' + (Math.round((longs + shorts) / 1e5) / 10) + 'M (롱 $' + (Math.round(longs / 1e5) / 10) + 'M · 숏 $' + (Math.round(shorts / 1e5) / 10) + 'M) — 기준 $' + (lim(c) / 1e6) + 'M'); st[c] = Date.now(); }
     } catch (e) { /* 다음에 */ }
   });
-  if (out.length) { send_('## 💥 대량 청산 (OKX 최근 10분)\n' + out.join('\n') + '\n-# 롱 청산이 몰리면 급락 끝자락, 숏 청산이 몰리면 급등 끝자락인 경우가 많음 · 같은 코인은 1시간에 한 번'); P.setProperty('LIQ_STATE', JSON.stringify(st)); }
+  // 청산 밀집 구간 접근: 매시 한 번만(지도는 30분 캐시) — 현재가가 가장 큰 밀집 구간 1% 안이면, 같은 구간은 6시간에 한 번
+  const hourKey = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyyMMddHH');
+  if (cfg.near && st.nearHour !== hourKey) {
+    st.nearHour = hourKey;
+    cfg.coins.slice(0, 5).forEach((c) => {
+      try {
+        const m = liqMap_(c); const all = m.longs.map((x) => ({ px: x.px, usd: x.usd, side: '롱' })).concat(m.shorts.map((x) => ({ px: x.px, usd: x.usd, side: '숏' })));
+        const big = all.filter((x) => x.usd >= lim(c) * 2 && Math.abs(x.px / m.price - 1) <= 0.01).sort((x, y) => y.usd - x.usd)[0];
+        if (!big) return;
+        const key = 'near_' + c + '_' + Math.round(big.px);
+        if (st[key] && Date.now() - st[key] < 6 * 3600e3) return;
+        st[key] = Date.now();
+        near.push('**' + c + '** 지금 ' + fmt_(m.price) + ' → ' + big.side + ' 청산 밀집 ' + fmt_(big.px) + ' (' + ((big.px / m.price - 1) * 100).toFixed(2) + '%, 추정 $' + (Math.round(big.usd / 1e5) / 10) + 'M)');
+      } catch (e) { /* 다음에 */ }
+    });
+  }
+  Object.keys(st).forEach((k) => { if (/^near_/.test(k) && Date.now() - st[k] > 24 * 3600e3) delete st[k]; });
+  if (out.length) send_('## 💥 대량 청산 (OKX 최근 10분)\n' + out.join('\n') + '\n-# 롱 청산이 몰리면 급락의 끝자락, 숏 청산이 몰리면 급등의 끝자락인 경우가 많음(단정 아님) · 같은 코인 1시간에 한 번', { discordOnly: true });
+  if (near.length) send_('## 🔥 청산 밀집 구간 접근 (추정)\n' + near.join('\n') + '\n-# 청산이 몰린 가격대는 가격을 끌어당기거나 닿은 뒤 급하게 움직이는 경우가 있음 — 추정치, 공부용 · 같은 구간 6시간에 한 번', { discordOnly: true });
+  P.setProperty('LIQ_STATE', JSON.stringify(st));
 }
 
 /* ───────── 📅 경제 일정(v18): 이번 주 중요 발표(Forex Factory 공개 일정, 1시간 캐시) ───────── */
@@ -1865,13 +1923,14 @@ function watch_() {
 }
 function hasTrigger_() { return ScriptApp.getProjectTriggers().some((t) => t.getHandlerFunction() === '가격확인'); }
 // 설정된 곳(텔레그램·디스코드) 모두에 보낸다. 한 곳이라도 성공하면 통과, 모두 실패하면 오류
-function send_(text) {
+function send_(text, opt) {
+  opt = opt || {};
   const P = PropertiesService.getScriptProperties();
   const token = (P.getProperty('TELEGRAM_BOT_TOKEN') || '').trim(), chat = (P.getProperty('TELEGRAM_CHAT_ID') || '').trim();
   const hook = discordUrl_();
   if (!(token && chat) && !hook) throw new Error('스크립트 속성에 텔레그램(TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID) 또는 디스코드(DISCORD_WEBHOOK_URL)가 없습니다');
   const done = [], fail = [];
-  if (token && chat) {
+  if (token && chat && !opt.discordOnly) {
     const plain = String(text).split('\n').map((l) => l.replace(/^(#{1,3}|-#|>)\s+/, '')).join('\n').replace(/\*\*/g, '');
     const r = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/sendMessage', { method: 'post', contentType: 'application/json', payload: JSON.stringify({ chat_id: chat, text: plain, disable_web_page_preview: true }), muteHttpExceptions: true });
     (r.getResponseCode() === 200 ? done : fail).push('텔레그램' + (r.getResponseCode() === 200 ? '' : '(' + r.getResponseCode() + ')'));
