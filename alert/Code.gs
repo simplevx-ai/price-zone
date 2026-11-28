@@ -26,7 +26,7 @@
  * 처음 한 번: 편집기에서 '알림켜기' 실행 → 10분마다 '가격확인'이 돌도록 트리거가 만들어진다.
  */
 
-const VERSION = 16;
+const VERSION = 17;
 const RECALC_HOUR = 14;     // 한국 시간 14시 이후 하루 한 번 구간 재계산(국내주식 공공데이터가 13시 이후 갱신되므로)
 const RECALC_BUDGET_MS = 240e3; // 한 번에 4분까지만 계산하고 남은 종목은 10분 뒤 이어서
 const COOLDOWN_H = 6;       // 같은 구간 알림은 6시간에 한 번
@@ -236,9 +236,30 @@ function naverRelay_(d) {
         trend: (Array.isArray(tr) ? tr : []).map((x) => ({ day: x.bizdate, foreign: nvNum_(x.foreignerPureBuyQuant), organ: nvNum_(x.organPureBuyQuant), indiv: nvNum_(x.individualPureBuyQuant), hold: x.foreignerHoldRatio, close: nvNum_(x.closePrice) })) };
     }
     if (d.kind === 'index') return { ok: true, index: naverIndex_() };
+    if (d.kind === 'macro') return { ok: true, macro: naverMacro_() };
     if (d.kind === 'fx') { const j = naverJson_('https://m.stock.naver.com/front-api/marketIndex/productDetail?category=exchange&reutersCode=FX_USDKRW'); return { ok: true, usdkrw: nvNum_(j.result && j.result.closePrice), at: j.result && j.result.localTradedAt }; }
     return { ok: false, error: '모르는 요청' };
   } catch (e) { return { ok: false, error: '네이버: ' + e.message }; }
+}
+// 시장 지표 묶음(5분 캐시). 하나가 실패해도 나머지는 보냄
+function naverMacro_() {
+  const cache = CacheService.getScriptCache(), hit = cache.get('nv_macro');
+  if (hit) return JSON.parse(hit);
+  const sign = (code) => (code === '5' || code === '4' ? -1 : 1);
+  const one = (key, fn) => { try { const x = fn(); x.key = key; return x; } catch (e) { return { key: key, error: String(e.message).slice(0, 60) }; } };
+  const idx = (key, code, name) => one(key, () => { const j = naverJson_('https://api.stock.naver.com/index/' + encodeURIComponent(code) + '/basic'); const sg = sign(j.compareToPreviousPrice && j.compareToPreviousPrice.code); return { name: name, price: nvNum_(j.closePrice), chg: sg * Math.abs(nvNum_(j.fluctuationsRatio)), status: j.marketStatus || '', at: j.localTradedAt || '' }; });
+  const mi = (key, cat, code, name) => one(key, () => { const r = naverJson_('https://m.stock.naver.com/front-api/marketIndex/productDetail?category=' + cat + '&reutersCode=' + encodeURIComponent(code)).result || {}; const sg = sign(r.fluctuationsType && r.fluctuationsType.code); return { name: name, price: nvNum_(r.closePrice), chg: sg * Math.abs(nvNum_(r.fluctuationsRatio)), diff: sg * Math.abs(nvNum_(r.fluctuations)), at: r.localTradedAt || '' }; });
+  const L = [
+    idx('nasdaq', '.IXIC', '나스닥'), idx('sp500', '.INX', 'S&P500'), idx('dow', '.DJI', '다우'), idx('vix', '.VIX', 'VIX(공포지수)'),
+    mi('us10y', 'bond', 'US10YT=RR', '미국 10년물 금리'), mi('dxy', 'exchange', '.DXY', '달러지수'), mi('usdkrw', 'exchange', 'FX_USDKRW', '원/달러'),
+    mi('wti', 'energy', 'CLcv1', 'WTI 유가'), mi('gold', 'metals', 'GCcv1', '금'),
+  ];
+  try { naverIndex_().forEach((x) => L.push({ key: x.code.toLowerCase(), name: x.name, price: nvNum_(x.price), chg: nvNum_(x.chg), status: x.status })); } catch (e) { /* 국내 지수 없이 */ }
+  let flow = null;
+  try { const t = naverJson_('https://m.stock.naver.com/api/index/KOSPI/trend'); flow = { day: t.bizdate, foreign: nvNum_(t.foreignValue), inst: nvNum_(t.institutionalValue), indiv: nvNum_(t.personalValue), unit: '억원' }; } catch (e) { /* 수급 없이 */ }
+  const out = { at: new Date().toISOString(), items: L, kospiFlow: flow };
+  cache.put('nv_macro', JSON.stringify(out), 300);
+  return out;
 }
 /** 편집기에서 실행: 네이버 연결 점검(삼성전자 일봉·지금가·지수·환율) */
 function 네이버점검() {

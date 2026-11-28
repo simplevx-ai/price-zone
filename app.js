@@ -7,7 +7,7 @@
  */
 'use strict';
 
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.5.0';
 // 기본 관심 종목: 비트코인 · 비트코인 선물 · 나스닥 선물 · 테더(원화 시세 ≈ 원/달러 체감 환율)
 const DEFAULT_WATCH = [
   { cat: 'coin', sym: 'KRW-BTC', name: '비트코인', tf: 'day' },
@@ -173,6 +173,7 @@ async function viewList() {
   const draw = async () => {
     const L = watch.filter((w) => sel === 'all' || w.cat === sel);
     view().innerHTML = `<div class="card warnlist" style="margin-top:0;font-size:13px">📘 공부용 도구입니다. 여러 근거가 겹치는 가격대를 보여 줄 뿐 <b>매수 추천이 아니며</b>, 결정과 책임은 본인에게 있습니다.</div>
+      <div id="mk"></div>
       ${catChips(sel, true)}
       <div class="row spread" style="margin:2px 0 6px"><span class="muted" style="font-size:12px">${L.length}종목</span><button class="btn small${edit ? ' primary' : ''}" id="wedit" type="button">${edit ? '✓ 편집 끝' : '✏️ 편집(빼기)'}</button></div>
       <div id="ls">${L.map((w) => edit ? `<div class="coin row spread" data-id="${esc(idOf(w))}"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)}${w.alert ? ' 🔔' : ''}</span><button class="btn small danger" type="button" data-rm="${esc(w.cat)}|${esc(w.sym)}">🗑 빼기</button></div>` : `<a class="coin" href="#/a/${w.cat}/${enc(w.sym)}" data-id="${esc(idOf(w))}"><div class="row spread"><span class="nm">${CATS[w.cat].icon} ${esc(w.name)} <span class="muted" style="font-size:12px">${esc(w.cat === 'coin' ? w.sym.slice(4) : w.sym)}</span>${w.alert ? ' 🔔' : ''}</span><span class="px muted">…</span></div><div class="row spread muted info" style="font-size:13px;margin-top:4px"><span>${CATS[w.cat].label} · ${TFS[w.tf || 'day'].label}</span><span></span></div></a>`).join('') || `<div class="empty">${sel === 'all' ? '관심 종목이 없습니다.' : CATS[sel].label + ' 종목이 없습니다.'}</div>`}</div>
@@ -180,6 +181,7 @@ async function viewList() {
       ${(await KV.get('lowVolGone', [])).length ? `<details class="card" style="margin-top:10px"><summary class="muted" style="font-size:13px">거래가 적어 자동으로 뺀 종목</summary><div class="muted" style="font-size:12px;margin-top:4px">${(await KV.get('lowVolGone', [])).slice(0, 10).map((x) => `${esc(x.name)}(${esc(x.why)}, ${new Date(x.at).toLocaleDateString('ko-KR')})`).join(' · ')}</div></details>` : ''}
       <div class="muted" style="font-size:11px;margin-top:6px">코인은 하루 거래 10억 원, 코인선물은 100만 USDT보다 적으면 관심 종목에서 자동으로 뺍니다(비트코인·비트코인 선물·나스닥 선물·테더는 제외).</div>
       <div class="disc">시세: 업비트·빗썸·바이낸스·OKX·바이비트(공개) · Alpha Vantage · 공공데이터포털 · 한국투자증권 · v${APP_VERSION}</div>`;
+    macroCard($('#mk'), { title: '🌍 시장 전체', groups: sel === 'kr' ? ['kr', 'fx'] : sel === 'us' || sel === 'ffut' ? ['perp', 'us', 'fx'] : sel === 'coin' || sel === 'cfut' ? ['coin', 'fx'] : ['perp', 'us', 'fx', 'kr', 'coin'] }).catch(() => {});
     view().querySelectorAll('[data-cat]').forEach((b) => { b.onclick = () => { sel = b.dataset.cat; sessionStorage.setItem('pzCat', sel); draw(); }; });
     $('#wedit').onclick = () => { edit = !edit; draw(); };
     view().querySelectorAll('[data-rm]').forEach((b) => { b.onclick = async () => { const [c, sy] = b.dataset.rm.split('|'), w = watch.find((x) => x.cat === c && x.sym === sy); if (!w || !confirm(`${w.name}을(를) 관심 종목에서 뺄까요?${w.alert ? ' (켜 둔 알림도 같이 꺼집니다)' : ''}`)) return; await removeWatch(c, sy); watch.splice(watch.indexOf(w), 1); draw(); }; });
